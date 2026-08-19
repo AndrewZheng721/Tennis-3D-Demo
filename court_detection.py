@@ -1,3 +1,5 @@
+# 旧版 HSV + 霍夫直线实验脚本。正式球场检测请用：
+#   python stage4_court_detection.py --video ... --out ...
 import cv2
 import numpy as np
 import os

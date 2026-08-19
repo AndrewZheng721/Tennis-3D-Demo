@@ -3,32 +3,56 @@ import subprocess
 
 VIDEO_DIR = "data/videos"
 
-for video in os.listdir(VIDEO_DIR):
 
-    if not video.endswith(".mp4"):
-        continue
+def run(cmd):
+    print(" ".join(cmd))
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
 
-    video_path = os.path.join(VIDEO_DIR, video)
-    video_name = video.replace(".mp4", "")
 
-    print("\n====================")
-    print("Processing:", video_name)
-    print("====================")
+def main():
+    if not os.path.isdir(VIDEO_DIR):
+        raise SystemExit(f"找不到 {VIDEO_DIR}")
 
-    # stage1
-    subprocess.run([
-        "python", "stage1_pose_tracking.py",
-        "--video", video_path,
-        "--out", f"outputs/{video_name}"
-    ])
+    for video in os.listdir(VIDEO_DIR):
+        if not video.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
+            continue
 
-    # stage2
-    subprocess.run([
-        "python", "stage2_pose3d_pro.py",
-        "--input", f"outputs/{video_name}/tracked_pose.pkl",
-        "--out", f"outputs/{video_name}"
-    ])
+        video_path = os.path.join(VIDEO_DIR, video)
+        video_name = os.path.splitext(video)[0]
+        out_dir = os.path.join("outputs", video_name)
 
-    # stage3（人工，不自动跑）
-    print(f"\n👉 Run Stage3 manually for: {video_name}")
-    
+        print("\n====================")
+        print("Processing:", video_name)
+        print("====================")
+
+        run([
+            "python", "stage1_pose_tracking.py",
+            "--video", video_path,
+            "--out", out_dir,
+        ])
+
+        run([
+            "python", "stage2_pose3d_pro.py",
+            "--input", f"{out_dir}/tracked_pose.pkl",
+            "--out", out_dir,
+        ])
+
+        run([
+            "python", "stage4_court_detection.py",
+            "--video", video_path,
+            "--out", out_dir,
+        ])
+
+        run([
+            "python", "stage3_ball_detection.py",
+            "--video", video_path,
+            "--out", out_dir,
+        ])
+
+        print(f"\nStage3 动作标注仍需人工：{video_name}")
+
+
+if __name__ == "__main__":
+    main()
