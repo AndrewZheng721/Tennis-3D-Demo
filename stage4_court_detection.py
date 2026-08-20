@@ -119,7 +119,7 @@ def main():
     cap.release()
     writer.release()
 
-    print("quality_ok:", detection.quality_ok, detection.quality_reason)
+    print("quality_ok:", detection.quality_ok, detection.method, detection.quality_reason)
     print("json:", json_path)
     print("video:", vis_path)
     if not detection.quality_ok:

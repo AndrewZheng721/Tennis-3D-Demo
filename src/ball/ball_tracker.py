@@ -19,9 +19,14 @@ YOLO（You Only Look Once）是目标检测模型：给它一张图，它输出�
 为什么检测完还要插值？
 --------------------
 即使微调过，仍会有漏检。
-插值的意思是：如果第 10 帧和第 12 帧都看到了球，第 11 帧没看到，
-就在两点之间按直线把第 11 帧补上。
-这不是物理仿真，只是把断掉的轨迹连起来，后面画轨迹和分析击球才有连续数据。
+只在「很短的空缺」里插值，例如球飞过网被挡了 3～5 帧。
+如果两帧之间球突然跳到画面另一侧，那是误检，必须断开，不能连成折线。
+
+水平机位轨迹为什么会乱
+--------------------
+旧逻辑每帧都选「置信度最高的框」。灯光、网、鞋子都可能比真球分更高，
+于是点在画面里乱跳，再被无限制插值连成蜘蛛网。
+现在改为：优先选离上一帧球心近的框；跳太远就丢掉；漏检超过几帧才重新搜索。
 
 击球帧怎么找？
 ------------
@@ -59,13 +64,15 @@ class BallTracker:
         self.conf = conf
         self.imgsz = imgsz
         self.coco_sports_ball = coco_sports_ball
+        self._prev_center = None
+        self._misses = 0
 
-    def detect_frame(self, frame: np.ndarray) -> Dict[int, List[float]]:
-        """检测单帧。约定只保留一个球，存在编号 1 下面。
+    def reset(self):
+        """换一段视频前调用，清掉上一支球的位置记忆。"""
+        self._prev_center = None
+        self._misses = 0
 
-        若同一帧出现多个框，取置信度最高的那个。
-        没有检测到时返回空字典，后面插值会把空缺补上。
-        """
+    def _candidates(self, frame: np.ndarray):
         kwargs = {
             "conf": self.conf,
             "imgsz": self.imgsz,
@@ -75,11 +82,9 @@ class BallTracker:
             kwargs["classes"] = [32]
 
         result = self.model.predict(frame, **kwargs)[0]
-        best = None
-        best_conf = -1.0
+        found = []
         if result.boxes is None:
-            return {}
-
+            return found
         names = result.names
         for box in result.boxes:
             cls_id = int(box.cls[0])
@@ -87,13 +92,47 @@ class BallTracker:
             if self.coco_sports_ball and name != "sports ball":
                 continue
             conf = float(box.conf[0])
-            if conf > best_conf:
-                best_conf = conf
-                xyxy = box.xyxy[0].cpu().numpy().tolist()
-                best = xyxy + [conf]
+            xyxy = box.xyxy[0].cpu().numpy().tolist()
+            found.append(xyxy + [conf])
+        return found
 
-        if best is None:
+    def detect_frame(self, frame: np.ndarray) -> Dict[int, List[float]]:
+        """检测单帧。有上一帧位置时，优先跟近处的框，而不是全局最高分。"""
+        h, w = frame.shape[:2]
+        max_jump = 0.12 * float(np.hypot(w, h))
+        cands = self._candidates(frame)
+        if not cands:
+            self._misses += 1
+            if self._misses > 8:
+                self._prev_center = None
             return {}
+
+        def center_of(box):
+            return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+
+        if self._prev_center is None:
+            best = max(cands, key=lambda b: b[4])
+        else:
+            scored = []
+            for box in cands:
+                cx, cy = center_of(box)
+                dist = float(np.hypot(cx - self._prev_center[0], cy - self._prev_center[1]))
+                if dist > max_jump:
+                    continue
+                scored.append((box[4] - 0.6 * (dist / max_jump), box))
+            if scored:
+                best = max(scored, key=lambda x: x[0])[1]
+            else:
+                best = max(cands, key=lambda b: b[4])
+                if best[4] < 0.4:
+                    self._misses += 1
+                    if self._misses > 8:
+                        self._prev_center = None
+                    return {}
+                self._prev_center = None
+
+        self._prev_center = center_of(best)
+        self._misses = 0
         return {1: best}
 
     def detect_video(
@@ -142,26 +181,32 @@ class BallTracker:
                 confs.append(np.nan)
 
         df = pd.DataFrame(rows, columns=["x1", "y1", "x2", "y2"])
-        df = df.interpolate(limit_direction="both")
-        df = df.bfill().ffill()
-        conf_s = pd.Series(confs).interpolate(limit_direction="both").bfill().ffill()
+        df = df.interpolate(limit=8)
+        conf_s = pd.Series(confs).interpolate(limit=8)
 
         filled = []
+        prev_c = None
         for i, row in df.iterrows():
             if row.isna().any():
                 filled.append({})
-            else:
-                filled.append(
-                    {
-                        1: [
-                            float(row["x1"]),
-                            float(row["y1"]),
-                            float(row["x2"]),
-                            float(row["y2"]),
-                            float(conf_s.iloc[i]) if not np.isnan(conf_s.iloc[i]) else 0.0,
-                        ]
-                    }
-                )
+                continue
+            box = [
+                float(row["x1"]),
+                float(row["y1"]),
+                float(row["x2"]),
+                float(row["y2"]),
+                float(conf_s.iloc[i]) if not np.isnan(conf_s.iloc[i]) else 0.0,
+            ]
+            cx = (box[0] + box[2]) / 2.0
+            cy = (box[1] + box[3]) / 2.0
+            if prev_c is not None:
+                jump = float(np.hypot(cx - prev_c[0], cy - prev_c[1]))
+                if jump > 220:
+                    filled.append({})
+                    prev_c = None
+                    continue
+            filled.append({1: box})
+            prev_c = (cx, cy)
         return filled
 
     def get_ball_shot_frames(
@@ -259,9 +304,34 @@ class BallTracker:
     ) -> np.ndarray:
         """画当前框、最近一段轨迹、击球标记。"""
         vis = frame.copy()
+        h, w = vis.shape[:2]
+        max_jump = 0.12 * float(np.hypot(w, h))
         if len(trail) >= 2:
-            pts = np.array(trail, dtype=np.int32).reshape(-1, 1, 2)
-            cv2.polylines(vis, [pts], False, (0, 255, 255), 2)
+            seg = []
+            for p in trail:
+                if not seg:
+                    seg = [p]
+                    continue
+                if np.hypot(p[0] - seg[-1][0], p[1] - seg[-1][1]) > max_jump:
+                    if len(seg) >= 2:
+                        cv2.polylines(
+                            vis,
+                            [np.array(seg, dtype=np.int32).reshape(-1, 1, 2)],
+                            False,
+                            (0, 255, 255),
+                            2,
+                        )
+                    seg = [p]
+                else:
+                    seg.append(p)
+            if len(seg) >= 2:
+                cv2.polylines(
+                    vis,
+                    [np.array(seg, dtype=np.int32).reshape(-1, 1, 2)],
+                    False,
+                    (0, 255, 255),
+                    2,
+                )
         if bbox_with_conf:
             x1, y1, x2, y2 = map(int, bbox_with_conf[:4])
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)

@@ -32,9 +32,9 @@ ResNet50 是一种卷积神经网络（CNN）。
 这个模型的能力边界
 ------------------
 训练数据几乎全是「高位、从底线后方拍的转播机位」。
-水平机位、只拍半场、无人机俯视，效果会明显变差。
-这不是微调几轮就能修好的：数据分布和 224 回归精度都不合适。
-水平机位需要另选模型（见测试说明）。
+水平机位会把远端点投到幕墙上。检测到这种情况时，
+自动改用几何法：场地颜色块 → 四个角 → 按标准球场比例投影 14 个点。
+不要微调这个 ResNet 去适应水平机位。
 """
 
 from dataclasses import dataclass, field
@@ -45,6 +45,12 @@ import numpy as np
 import torch
 import torchvision.transforms as transforms
 from torchvision import models
+
+from .geometric_court import (
+    adaptive_surface_mask,
+    detect_geometric,
+    keypoints_on_mask,
+)
 
 
 COURT_KEYPOINT_NAMES = [
@@ -126,6 +132,7 @@ class CourtDetection:
     quality_ok: bool
     quality_reason: str
     frame_id: int = 0
+    method: str = "resnet"
     names: List[str] = field(default_factory=lambda: list(COURT_KEYPOINT_NAMES))
 
     def to_json(self):
@@ -133,6 +140,7 @@ class CourtDetection:
         H_inv = self.homography_image_to_ref
         return {
             "frame_id": int(self.frame_id),
+            "method": self.method,
             "quality_ok": bool(self.quality_ok),
             "quality_reason": self.quality_reason,
             "keypoints": [
@@ -334,40 +342,97 @@ class CourtLineDetector:
         return best_proj.flatten().astype(np.float32), best_H, H_inv
 
     def assess_quality(self, keypoints: np.ndarray, image_shape) -> Tuple[bool, str]:
-        """粗查这组点像不像一个能用的球场，用来提示水平机位/半场特写。"""
+        """粗查这组点像不像一个能用的球场。"""
         h, w = image_shape[:2]
         pts = keypoints.reshape(14, 2)
         if np.any(~np.isfinite(pts)):
             return False, "存在无效坐标"
         if np.any(pts[:, 0] < -0.1 * w) or np.any(pts[:, 0] > 1.1 * w):
-            return False, "关键点明显超出画面，当前机位可能不是高位全场"
+            return False, "关键点明显超出画面"
         if np.any(pts[:, 1] < -0.1 * h) or np.any(pts[:, 1] > 1.1 * h):
-            return False, "关键点明显超出画面，当前机位可能不是高位全场"
+            return False, "关键点明显超出画面"
         quad = pts[[0, 1, 3, 2]].astype(np.float32)
         area = abs(cv2.contourArea(quad))
         img_area = float(w * h)
         if area < 0.04 * img_area:
-            return False, "球场四边形过小，可能是半场特写或水平机位"
-        xs = pts[:, 0]
-        if (xs.max() - xs.min()) < 0.15 * w:
-            return False, "关键点横向挤在一起，模型可能没看懂这张图"
+            return False, "球场四边形过小"
+        if (pts[:, 0].max() - pts[:, 0].min()) < 0.15 * w:
+            return False, "关键点横向挤在一起"
+        far_y = float((pts[0, 1] + pts[1, 1]) / 2)
+        near_y = float((pts[2, 1] + pts[3, 1]) / 2)
+        if near_y <= far_y + 8:
+            return False, "远近底线上下关系不对"
         return True, "ok"
 
-    def predict(self, image: np.ndarray, frame_id: int = 0) -> CourtDetection:
-        """对单帧做完整检测：CNN → 白线精修 → 单应性吸附 → 质量检查。"""
-        keypoints = self._predict_raw(image)
-        keypoints = self._refine(image, keypoints)
-        keypoints, H, H_inv = self._homography_snap(keypoints)
-        quality_ok, reason = self.assess_quality(keypoints, image.shape)
-        xy = keypoints.reshape(14, 2)
+    def _resnet_usable(self, keypoints: np.ndarray, image: np.ndarray, mask) -> Tuple[bool, str]:
+        """ResNet 结果必须几何合理，并且点要落在场地颜色上。
+
+        水平机位典型失败：点在幕布/墙上，几何检查仍可能过，所以必须看颜色。
+        """
+        ok, reason = self.assess_quality(keypoints, image.shape)
+        if not ok:
+            return False, reason
+        if mask is None:
+            return False, "没有场地颜色块，无法确认点是否在场上"
+        hit = keypoints_on_mask(keypoints.reshape(14, 2), mask)
+        if hit < 8:
+            return False, f"只有{hit}/14个点落在场地上，像水平机位误检"
+        return True, "ok"
+
+    def _pack(
+        self,
+        keypoints: np.ndarray,
+        H,
+        H_inv,
+        image: np.ndarray,
+        frame_id: int,
+        method: str,
+        quality_ok: bool,
+        reason: str,
+    ) -> CourtDetection:
         return CourtDetection(
             keypoints=keypoints,
-            keypoints_xy=xy,
+            keypoints_xy=keypoints.reshape(14, 2),
             homography_ref_to_image=H,
             homography_image_to_ref=H_inv,
             quality_ok=quality_ok,
             quality_reason=reason,
             frame_id=frame_id,
+            method=method,
+        )
+
+    def _geometric_detection(self, image: np.ndarray, frame_id: int) -> Optional[CourtDetection]:
+        geo = detect_geometric(image)
+        if geo is None:
+            return None
+        keypoints, H, H_inv, mask, color_name = geo
+        ok, reason = self.assess_quality(keypoints, image.shape)
+        hit = keypoints_on_mask(keypoints.reshape(14, 2), mask)
+        if hit < 5:
+            ok = False
+            reason = f"几何投影只有{hit}个点落在{color_name}场地上"
+        elif ok:
+            reason = f"geometric/{color_name}"
+        return self._pack(
+            keypoints, H, H_inv, image, frame_id, "geometric", ok, reason
+        )
+
+    def predict(self, image: np.ndarray, frame_id: int = 0) -> CourtDetection:
+        """先试 ResNet；点不在场地上就改用几何法。"""
+        mask, _ = adaptive_surface_mask(image)
+        keypoints = self._predict_raw(image)
+        keypoints = self._refine(image, keypoints)
+        keypoints, H, H_inv = self._homography_snap(keypoints)
+        usable, reason = self._resnet_usable(keypoints, image, mask)
+        if usable:
+            return self._pack(
+                keypoints, H, H_inv, image, frame_id, "resnet", True, reason
+            )
+        geo = self._geometric_detection(image, frame_id)
+        if geo is not None:
+            return geo
+        return self._pack(
+            keypoints, H, H_inv, image, frame_id, "resnet", False, reason
         )
 
     def predict_video_sampled(
@@ -375,36 +440,40 @@ class CourtLineDetector:
         read_frame_fn,
         sample_ids: List[int],
     ) -> CourtDetection:
-        """在若干帧上检测，取中位数，减轻某一帧被人或镜头晃动干扰。
-
-        转播机位通常是固定的，球场不会动。
-        多帧取中位数，比只信第 0 帧更稳。
-        """
-        all_kps = []
-        last_image = None
-        last_id = sample_ids[0]
+        """多帧 ResNet 中位数；不合格则在抽到的帧上跑几何法，取场地最大的一帧。"""
+        frames = []
         for fid in sample_ids:
             image = read_frame_fn(fid)
             if image is None:
                 continue
-            last_image = image
-            last_id = fid
-            all_kps.append(self._predict_raw(image))
-        if not all_kps:
+            frames.append((fid, image))
+        if not frames:
             raise RuntimeError("没有读到可用于球场检测的帧")
+
+        all_kps = [self._predict_raw(im) for _, im in frames]
+        last_id, last_image = frames[-1]
         keypoints = np.median(np.stack(all_kps, axis=0), axis=0).astype(np.float32)
         keypoints = self._refine(last_image, keypoints)
         keypoints, H, H_inv = self._homography_snap(keypoints)
-        quality_ok, reason = self.assess_quality(keypoints, last_image.shape)
-        xy = keypoints.reshape(14, 2)
-        return CourtDetection(
-            keypoints=keypoints,
-            keypoints_xy=xy,
-            homography_ref_to_image=H,
-            homography_image_to_ref=H_inv,
-            quality_ok=quality_ok,
-            quality_reason=reason,
-            frame_id=last_id,
+        mask, _ = adaptive_surface_mask(last_image)
+        usable, reason = self._resnet_usable(keypoints, last_image, mask)
+        if usable:
+            return self._pack(
+                keypoints, H, H_inv, last_image, last_id, "resnet", True, reason
+            )
+
+        best = None
+        for fid, image in frames:
+            geo = self._geometric_detection(image, fid)
+            if geo is None:
+                continue
+            area = abs(cv2.contourArea(geo.keypoints_xy[[0, 1, 3, 2]].astype(np.float32)))
+            if best is None or area > best[0]:
+                best = (area, geo)
+        if best is not None:
+            return best[1]
+        return self._pack(
+            keypoints, H, H_inv, last_image, last_id, "resnet", False, reason
         )
 
     def draw(self, image: np.ndarray, detection: CourtDetection) -> np.ndarray:
@@ -428,13 +497,16 @@ class CourtLineDetector:
                 (0, 0, 255),
                 2,
             )
-        tag = "court ok" if detection.quality_ok else f"court warn: {detection.quality_reason}"
+        tag = (
+            f"{detection.method} "
+            + ("ok" if detection.quality_ok else f"warn: {detection.quality_reason}")
+        )
         cv2.putText(
             output,
-            tag,
+            tag[:70],
             (20, 70),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
+            0.6,
             color,
             2,
         )

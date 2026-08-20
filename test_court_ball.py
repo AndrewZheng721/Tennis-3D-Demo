@@ -115,7 +115,7 @@ def main():
         }
         with open(os.path.join(args.out, "court_keypoints.json"), "w", encoding="utf-8") as f:
             json.dump(court_json, f, ensure_ascii=False, indent=2)
-        print("court quality_ok:", detection.quality_ok, detection.quality_reason)
+        print("court:", detection.method, detection.quality_ok, detection.quality_reason)
         if not detection.quality_ok:
             print("球场质量告警：水平/半场机位不要微调当前 ResNet，应换模型。")
     else:
@@ -134,6 +134,7 @@ def main():
             imgsz=args.imgsz,
             coco_sports_ball=args.coco_sports_ball,
         )
+        ball_tracker.reset()
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         raw = []
         with tqdm(total=total, desc="detect ball") as pbar:

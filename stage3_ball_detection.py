@@ -91,6 +91,7 @@ def main():
         imgsz=args.imgsz,
         coco_sports_ball=args.coco_sports_ball,
     )
+    tracker.reset()
 
     raw = []
     with tqdm(total=total, desc="detect ball") as pbar:
