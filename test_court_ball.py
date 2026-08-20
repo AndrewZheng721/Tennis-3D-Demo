@@ -10,10 +10,10 @@
     overlay_first.jpg    第一帧截图，方便快速看球场点准不准
 
 权重（放到 Tennis-3D-Demo/weights/）：
-    keypoints_model.pth
-        https://drive.google.com/file/d/1QrTOF1ToQ4plsSZbkBs3zOLkVt3MBlta/view
-    yolo5_last.pt
-        https://drive.google.com/file/d/1UZwiG1jkWgce9lNhxJ2L0NVjX1vGM05U/view
+    court_heatmap.pth     球场热力图（优先）
+        https://drive.google.com/file/d/1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG/view
+    keypoints_model.pth   ResNet 兜底，可没有
+    yolo5_last.pt         网球检测
 
 关于机位和要不要换模型（先看测试结果再决定）
 ----------------------------------------
@@ -52,6 +52,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="球场+网球联合测试")
     parser.add_argument("--video", required=True, help="测试视频路径")
     parser.add_argument("--out", required=True, help="输出目录")
+    parser.add_argument(
+        "--heatmap-weights",
+        default="weights/court_heatmap.pth",
+        help="TennisCourtDetector 热力图权重",
+    )
     parser.add_argument(
         "--court-weights",
         default="weights/keypoints_model.pth",
@@ -94,11 +99,16 @@ def main():
 
     detection = None
     if not args.skip_court:
-        if not os.path.isfile(args.court_weights):
+        if not os.path.isfile(args.heatmap_weights):
             raise FileNotFoundError(
-                f"找不到 {args.court_weights}，请先下载 keypoints_model.pth"
+                f"找不到 {args.heatmap_weights}\n"
+                "请下载 https://drive.google.com/file/d/1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG/view\n"
+                "保存为 weights/court_heatmap.pth"
             )
-        court_detector = CourtLineDetector(args.court_weights)
+        court_detector = CourtLineDetector(
+            model_path=args.court_weights if os.path.isfile(args.court_weights) else None,
+            heatmap_path=args.heatmap_weights,
+        )
         sample_ids = choose_sample_ids(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), args.court_samples)
         print("court sample frames:", sample_ids)
         detection = court_detector.predict_video_sampled(

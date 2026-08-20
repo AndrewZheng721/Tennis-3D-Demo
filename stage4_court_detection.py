@@ -4,9 +4,9 @@
     python stage4_court_detection.py --video data/xxx.mp4 --out outputs/xxx
 
 权重请放到：
-    weights/keypoints_model.pth
-下载地址（tennis_analysis 官方预训练）：
-    https://drive.google.com/file/d/1QrTOF1ToQ4plsSZbkBs3zOLkVt3MBlta/view
+    weights/court_heatmap.pth
+下载地址（TennisCourtDetector 热力图，优先）：
+    https://drive.google.com/file/d/1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG/view
 """
 
 import argparse
@@ -22,14 +22,22 @@ from src.court.court_line_detector import (
 )
 
 
+HEATMAP_URL = "https://drive.google.com/file/d/1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG/view"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="球场关键点检测")
     parser.add_argument("--video", required=True, help="输入视频路径")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument(
+        "--heatmap-weights",
+        default="weights/court_heatmap.pth",
+        help="TennisCourtDetector 热力图权重（优先）",
+    )
+    parser.add_argument(
         "--weights",
         default="weights/keypoints_model.pth",
-        help="ResNet50 球场关键点权重",
+        help="ResNet50 回归权重（仅兜底）",
     )
     parser.add_argument(
         "--samples",
@@ -49,11 +57,11 @@ def main():
     args = parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    if not os.path.isfile(args.weights):
+    if not os.path.isfile(args.heatmap_weights):
         raise FileNotFoundError(
-            f"找不到球场权重: {args.weights}\n"
-            "请从 https://drive.google.com/file/d/1QrTOF1ToQ4plsSZbkBs3zOLkVt3MBlta/view 下载，\n"
-            "保存为 weights/keypoints_model.pth"
+            f"找不到热力图权重: {args.heatmap_weights}\n"
+            f"请下载 {HEATMAP_URL}\n"
+            "保存为 weights/court_heatmap.pth"
         )
 
     cap = cv2.VideoCapture(args.video)
@@ -65,7 +73,11 @@ def main():
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    detector = CourtLineDetector(args.weights, device=args.device)
+    detector = CourtLineDetector(
+        model_path=args.weights if os.path.isfile(args.weights) else None,
+        heatmap_path=args.heatmap_weights,
+        device=args.device,
+    )
     sample_ids = choose_sample_ids(total, args.samples)
     print("video:", args.video)
     print("size:", width, height, "fps:", fps, "frames:", total)

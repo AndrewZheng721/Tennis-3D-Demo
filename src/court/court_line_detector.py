@@ -37,6 +37,7 @@ ResNet50 是一种卷积神经网络（CNN）。
 不要微调这个 ResNet 去适应水平机位。
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -204,41 +205,59 @@ def _intersect_from_hough(lines):
 
 
 class CourtLineDetector:
-    """用 ResNet50 预测球场 14 个关键点，再用白线交点和单应性把点吸附到场地上。"""
+    """球场检测：优先热力图，其次几何法，ResNet 只作高位转播兜底。"""
 
-    def __init__(self, model_path: str, device: Optional[str] = None):
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        device: Optional[str] = None,
+        heatmap_path: str = "weights/court_heatmap.pth",
+    ):
         """加载权重并切到推理模式。
 
-        model.eval() 非常关键：
-        训练时 BatchNorm 会用「当前这一小批数据」的均值方差；
-        推理时必须用训练阶段攒下来的全局统计量，否则点会整体漂。
+        heatmap_path：TennisCourtDetector 热力图权重，水平/高位都优先用它。
+        model_path：原来的 ResNet50 回归权重，热力图不可用时才考虑。
         """
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
+        self.model = None
+        self.transform = None
+        self.heatmap = None
 
-        try:
-            self.model = models.resnet50(weights=None)
-        except TypeError:
-            self.model = models.resnet50(pretrained=False)
+        if heatmap_path and os.path.isfile(heatmap_path):
+            from .heatmap_court import HeatmapCourtDetector
+            self.heatmap = HeatmapCourtDetector(heatmap_path, device=device)
 
-        self.model.fc = torch.nn.Linear(self.model.fc.in_features, 14 * 2)
-        state = self._load_state(model_path)
-        self.model.load_state_dict(state)
-        self.model.to(self.device)
-        self.model.eval()
+        if model_path and os.path.isfile(model_path):
+            try:
+                self.model = models.resnet50(weights=None)
+            except TypeError:
+                self.model = models.resnet50(pretrained=False)
+            self.model.fc = torch.nn.Linear(self.model.fc.in_features, 14 * 2)
+            state = self._load_state(model_path)
+            self.model.load_state_dict(state)
+            self.model.to(self.device)
+            self.model.eval()
+            self.transform = transforms.Compose(
+                [
+                    transforms.ToPILImage(),
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225],
+                    ),
+                ]
+            )
 
-        self.transform = transforms.Compose(
-            [
-                transforms.ToPILImage(),
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225],
-                ),
-            ]
-        )
+        if self.heatmap is None and self.model is None:
+            raise FileNotFoundError(
+                "请至少提供一个球场权重。\n"
+                "热力图（推荐）: weights/court_heatmap.pth\n"
+                "https://drive.google.com/file/d/1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG/view\n"
+                "ResNet: weights/keypoints_model.pth"
+            )
 
     def _load_state(self, model_path: str):
         """兼容不同 PyTorch 版本和 checkpoint 打包方式。"""
@@ -365,19 +384,38 @@ class CourtLineDetector:
         return True, "ok"
 
     def _resnet_usable(self, keypoints: np.ndarray, image: np.ndarray, mask) -> Tuple[bool, str]:
-        """ResNet 结果必须几何合理，并且点要落在场地颜色上。
+        """ResNet 结果必须几何合理，并且预测出的球场多边形要盖在场地颜色上。
 
-        水平机位典型失败：点在幕布/墙上，几何检查仍可能过，所以必须看颜色。
+        你那张水平机位图里 ResNet 仍报 ok，是因为不少点碰巧落在蓝色场地区域附近。
+        加上「整块四边形和场地掩膜的重合比例」后，漂在空中的框会被拒掉。
         """
         ok, reason = self.assess_quality(keypoints, image.shape)
         if not ok:
             return False, reason
         if mask is None:
             return False, "没有场地颜色块，无法确认点是否在场上"
-        hit = keypoints_on_mask(keypoints.reshape(14, 2), mask)
-        if hit < 8:
-            return False, f"只有{hit}/14个点落在场地上，像水平机位误检"
+        pts = keypoints.reshape(14, 2)
+        hit = keypoints_on_mask(pts, mask)
+        if hit < 10:
+            return False, f"只有{hit}/14个点落在场地上"
+        iou = self._quad_on_mask(pts, mask)
+        if iou < 0.45:
+            return False, f"球场框和场地颜色重合太低({iou:.2f})，像水平机位误检"
         return True, "ok"
+
+    def _quad_on_mask(self, pts: np.ndarray, mask: np.ndarray) -> float:
+        h, w = mask.shape[:2]
+        poly = np.zeros((h, w), np.uint8)
+        quad = np.round(pts[[0, 1, 3, 2]]).astype(np.int32)
+        try:
+            cv2.fillConvexPoly(poly, quad, 255)
+        except cv2.error:
+            return 0.0
+        inter = cv2.countNonZero(cv2.bitwise_and(poly, mask))
+        area = cv2.countNonZero(poly)
+        if area < 1:
+            return 0.0
+        return inter / float(area)
 
     def _pack(
         self,
@@ -417,30 +455,62 @@ class CourtLineDetector:
             keypoints, H, H_inv, image, frame_id, "geometric", ok, reason
         )
 
-    def predict(self, image: np.ndarray, frame_id: int = 0) -> CourtDetection:
-        """先试 ResNet；点不在场地上就改用几何法。"""
+    def _heatmap_detection(self, image: np.ndarray, frame_id: int) -> Optional[CourtDetection]:
+        if self.heatmap is None:
+            return None
+        keypoints, H, H_inv = self.heatmap.predict(image)
+        if keypoints is None or np.any(~np.isfinite(keypoints)):
+            return None
+        keypoints = self._refine(image, keypoints)
+        if H is None:
+            keypoints, H, H_inv = self._homography_snap(keypoints)
         mask, _ = adaptive_surface_mask(image)
+        ok, reason = self.assess_quality(keypoints, image.shape)
+        if mask is not None:
+            iou = self._quad_on_mask(keypoints.reshape(14, 2), mask)
+            if iou < 0.35:
+                ok = False
+                reason = f"热力图球场框和场地重合低({iou:.2f})"
+            elif ok:
+                reason = f"heatmap iou={iou:.2f}"
+        return self._pack(
+            keypoints, H, H_inv, image, frame_id, "heatmap", ok, reason
+        )
+
+    def _resnet_detection(self, image: np.ndarray, frame_id: int, mask) -> Optional[CourtDetection]:
+        if self.model is None:
+            return None
         keypoints = self._predict_raw(image)
         keypoints = self._refine(image, keypoints)
         keypoints, H, H_inv = self._homography_snap(keypoints)
         usable, reason = self._resnet_usable(keypoints, image, mask)
-        if usable:
-            return self._pack(
-                keypoints, H, H_inv, image, frame_id, "resnet", True, reason
-            )
-        geo = self._geometric_detection(image, frame_id)
-        if geo is not None:
-            return geo
         return self._pack(
-            keypoints, H, H_inv, image, frame_id, "resnet", False, reason
+            keypoints, H, H_inv, image, frame_id, "resnet", usable, reason
         )
+
+    def predict(self, image: np.ndarray, frame_id: int = 0) -> CourtDetection:
+        """优先热力图，其次几何法，最后才是 ResNet。"""
+        heat = self._heatmap_detection(image, frame_id)
+        if heat is not None and heat.quality_ok:
+            return heat
+        geo = self._geometric_detection(image, frame_id)
+        if geo is not None and geo.quality_ok:
+            return geo
+        mask, _ = adaptive_surface_mask(image)
+        resnet = self._resnet_detection(image, frame_id, mask)
+        if resnet is not None and resnet.quality_ok:
+            return resnet
+        for cand in (heat, geo, resnet):
+            if cand is not None:
+                return cand
+        raise RuntimeError("球场检测失败：热力图、几何法、ResNet 都不可用")
 
     def predict_video_sampled(
         self,
         read_frame_fn,
         sample_ids: List[int],
     ) -> CourtDetection:
-        """多帧 ResNet 中位数；不合格则在抽到的帧上跑几何法，取场地最大的一帧。"""
+        """在抽到的几帧上跑，优先热力图。"""
         frames = []
         for fid in sample_ids:
             image = read_frame_fn(fid)
@@ -450,31 +520,18 @@ class CourtLineDetector:
         if not frames:
             raise RuntimeError("没有读到可用于球场检测的帧")
 
-        all_kps = [self._predict_raw(im) for _, im in frames]
-        last_id, last_image = frames[-1]
-        keypoints = np.median(np.stack(all_kps, axis=0), axis=0).astype(np.float32)
-        keypoints = self._refine(last_image, keypoints)
-        keypoints, H, H_inv = self._homography_snap(keypoints)
-        mask, _ = adaptive_surface_mask(last_image)
-        usable, reason = self._resnet_usable(keypoints, last_image, mask)
-        if usable:
-            return self._pack(
-                keypoints, H, H_inv, last_image, last_id, "resnet", True, reason
-            )
-
         best = None
         for fid, image in frames:
-            geo = self._geometric_detection(image, fid)
-            if geo is None:
+            det = self.predict(image, frame_id=fid)
+            if det is None:
                 continue
-            area = abs(cv2.contourArea(geo.keypoints_xy[[0, 1, 3, 2]].astype(np.float32)))
-            if best is None or area > best[0]:
-                best = (area, geo)
-        if best is not None:
-            return best[1]
-        return self._pack(
-            keypoints, H, H_inv, last_image, last_id, "resnet", False, reason
-        )
+            area = abs(cv2.contourArea(det.keypoints_xy[[0, 1, 3, 2]].astype(np.float32)))
+            score = area + (1e12 if det.quality_ok else 0)
+            if best is None or score > best[0]:
+                best = (score, det)
+        if best is None:
+            raise RuntimeError("球场检测失败")
+        return best[1]
 
     def draw(self, image: np.ndarray, detection: CourtDetection) -> np.ndarray:
         """把点和线画到图上，方便肉眼检查对不对。"""
