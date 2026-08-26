@@ -61,6 +61,12 @@ def parse_args():
     parser.add_argument("--imgsz", type=int, default=1280)
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--court-samples", type=int, default=5)
+    parser.add_argument(
+        "--court-redetect",
+        type=int,
+        default=30,
+        help="每隔多少帧重新跑一次球场热力图，中间帧跟镜头",
+    )
     parser.add_argument("--skip-ball", action="store_true", help="只测球场")
     parser.add_argument("--skip-court", action="store_true", help="只测球")
     return parser.parse_args()
@@ -178,14 +184,23 @@ def main():
     shot_set = set(shot_frames)
     first_saved = False
     frame_id = 0
+    prev_gray = None
+    live = None
     with tqdm(total=total, desc="write overlay") as pbar:
         while frame_id < total:
             ok, frame = cap.read()
             if not ok:
                 break
             vis = frame
-            if detection is not None:
-                vis = court_detector.draw(vis, detection)
+            if court_detector is not None:
+                prev_gray, live = court_detector.track_frame(
+                    frame,
+                    frame_id,
+                    prev_gray,
+                    live,
+                    redetect_every=args.court_redetect,
+                )
+                vis = court_detector.draw(vis, live)
             box = None
             if filled is not None and frame_id < len(filled):
                 box = filled[frame_id].get(1)

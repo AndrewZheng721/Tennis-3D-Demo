@@ -603,6 +603,93 @@ class CourtLineDetector:
             raise RuntimeError("球场检测失败")
         return best[1]
 
+    def _ecc_affine(self, prev_gray: np.ndarray, curr_gray: np.ndarray):
+        """估计上一帧到当前帧的仿射变换，用来跟着摄像机推拉摇。
+
+        转播主镜头几乎每秒都在动。如果只用第 0 帧的球场点，后面网格会慢慢离开白线。
+        ECC 在缩小后的灰度图上算 2×3 仿射，再映射回原图像素。
+        """
+        h, w = prev_gray.shape[:2]
+        scale = min(1.0, 480.0 / float(max(h, w)))
+        if scale < 1.0:
+            size = (int(w * scale), int(h * scale))
+            a = cv2.resize(prev_gray, size)
+            b = cv2.resize(curr_gray, size)
+        else:
+            a, b = prev_gray, curr_gray
+            scale = 1.0
+        warp = np.eye(2, 3, dtype=np.float32)
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 40, 1e-4)
+        try:
+            cc, warp = cv2.findTransformECC(
+                a, b, warp, cv2.MOTION_AFFINE, criteria, None, 5
+            )
+        except TypeError:
+            try:
+                cc, warp = cv2.findTransformECC(
+                    a, b, warp, cv2.MOTION_AFFINE, criteria
+                )
+            except cv2.error:
+                return None, 0.0
+        except cv2.error:
+            return None, 0.0
+        warp[:, 2] /= scale
+        return warp, float(cc)
+
+    def _apply_affine(self, keypoints: np.ndarray, warp: np.ndarray) -> np.ndarray:
+        pts = keypoints.reshape(14, 2).astype(np.float32)
+        ones = np.ones((14, 1), np.float32)
+        out = (warp @ np.hstack([pts, ones]).T).T
+        return out.flatten().astype(np.float32)
+
+    def track_frame(
+        self,
+        image: np.ndarray,
+        frame_id: int,
+        prev_gray,
+        prev_det: Optional[CourtDetection],
+        redetect_every: int = 30,
+    ):
+        """逐帧跟上机位：平时用 ECC 拖点，隔一段时间重新跑热力图。"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        must = prev_det is None or (
+            redetect_every > 0 and frame_id % redetect_every == 0
+        )
+        if must:
+            try:
+                det = self.predict(image, frame_id)
+                if det.quality_ok or prev_det is None:
+                    return gray, det
+            except RuntimeError:
+                if prev_det is None:
+                    raise
+
+        if prev_det is not None and prev_gray is not None:
+            warp, cc = self._ecc_affine(prev_gray, gray)
+            if warp is not None and cc >= 0.2:
+                kps = self._apply_affine(prev_det.keypoints, warp)
+                kps = align_keypoints_to_white_lines(image, kps)
+                kps, H, H_inv = self._homography_snap(kps)
+                ok, reason = self.assess_quality(kps, image.shape)
+                base = prev_det.method.split("+")[0]
+                return gray, self._pack(
+                    kps,
+                    H,
+                    H_inv,
+                    image,
+                    frame_id,
+                    base + "+track",
+                    ok,
+                    "track" if ok else reason,
+                )
+
+        try:
+            return gray, self.predict(image, frame_id)
+        except RuntimeError:
+            if prev_det is None:
+                raise
+            return gray, prev_det
+
     def draw(self, image: np.ndarray, detection: CourtDetection) -> np.ndarray:
         """把点和线画到图上，方便肉眼检查对不对。"""
         output = image.copy()

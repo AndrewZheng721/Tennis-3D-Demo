@@ -46,9 +46,10 @@ def parse_args():
         help="抽几帧做中位数，机位固定时 5 帧足够",
     )
     parser.add_argument(
-        "--device",
-        default=None,
-        help="cuda 或 cpu，默认自动选",
+        "--redetect",
+        type=int,
+        default=30,
+        help="每隔多少帧重新跑热力图，中间帧跟随镜头",
     )
     return parser.parse_args()
 
@@ -109,11 +110,16 @@ def main():
     )
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     frame_id = 0
+    prev_gray = None
+    live = None
     while True:
         ok, frame = cap.read()
         if not ok:
             break
-        vis = detector.draw(frame, detection)
+        prev_gray, live = detector.track_frame(
+            frame, frame_id, prev_gray, live, redetect_every=args.redetect
+        )
+        vis = detector.draw(frame, live)
         cv2.putText(
             vis,
             f"Frame: {frame_id}",
