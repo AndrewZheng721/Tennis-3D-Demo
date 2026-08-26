@@ -72,31 +72,27 @@ def _load_state(path: str):
 def heatmap_peak(heatmap: np.ndarray, scale_x: float, scale_y: float, low_thresh: int = 170):
     """从一张热力图里取出最可能的角点。
 
-    先用霍夫圆（Hough）找亮斑，找不到就用最亮像素。
-    热力图是 360×640，要乘 scale 才能回到原图像素坐标。
+    霍夫圆会把亮斑当成「半径 10～30 的圆」，圆心经常比真实峰值偏下一点。
+    高位转播里整张球场网格整体下沉，多半就是这个偏差，再被单应性锁死。
+    这里改成亮斑加权质心；热力图像素中心再映射回原图。
     """
     hm = heatmap
     if hm.max() <= 1.5:
         hm = hm * 255.0
     hm_u8 = np.clip(hm, 0, 255).astype(np.uint8)
     _, binary = cv2.threshold(hm_u8, low_thresh, 255, cv2.THRESH_BINARY)
-    circles = cv2.HoughCircles(
-        binary,
-        cv2.HOUGH_GRADIENT,
-        dp=1,
-        minDist=20,
-        param1=50,
-        param2=2,
-        minRadius=10,
-        maxRadius=30,
-    )
-    if circles is not None:
-        x, y = float(circles[0][0][0]), float(circles[0][0][1])
-        return x * scale_x, y * scale_y
-    if hm_u8.max() < low_thresh:
-        return None, None
-    y, x = np.unravel_index(int(np.argmax(hm_u8)), hm_u8.shape)
-    return float(x) * scale_x, float(y) * scale_y
+    ys, xs = np.where(binary > 0)
+    if len(xs) >= 6:
+        w = hm[ys, xs].astype(np.float64)
+        w = np.maximum(w, 1e-6)
+        x = float((xs * w).sum() / w.sum())
+        y = float((ys * w).sum() / w.sum())
+    else:
+        if hm_u8.max() < low_thresh:
+            return None, None
+        y, x = np.unravel_index(int(np.argmax(hm_u8)), hm_u8.shape)
+        x, y = float(x), float(y)
+    return (x + 0.5) * scale_x - 0.5, (y + 0.5) * scale_y - 0.5
 
 
 def snap_with_partial_points(points: List[Optional[Tuple[float, float]]]):

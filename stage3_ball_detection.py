@@ -3,14 +3,12 @@
 用法：
     python stage3_ball_detection.py --video data/xxx.mp4 --out outputs/xxx
 
-优先使用网球微调权重：
-    weights/yolo5_last.pt
-下载地址：
-    https://drive.google.com/file/d/1UZwiG1jkWgce9lNhxJ2L0NVjX1vGM05U/view
+默认 TrackNet（高位小球）：
+    weights/tracknet.pth
+    https://huggingface.co/vishnushenoy09/tracknet-v1-tennis/resolve/main/tracknet_weights.pth
 
-如果没有专用权重，可以退回通用模型（效果会差一截）：
-    python stage3_ball_detection.py --video data/xxx.mp4 --out outputs/xxx \\
-        --weights weights/yolo26m.pt --coco-sports-ball
+YOLO 兜底：
+    python stage3_ball_detection.py --video data/xxx.mp4 --out outputs/xxx --backend yolo --weights weights/yolo5_last.pt
 """
 
 import argparse
@@ -20,7 +18,7 @@ import os
 import cv2
 from tqdm import tqdm
 
-from src.ball.ball_tracker import BallTracker
+from src.ball.tracknet_tracker import create_ball_tracker, default_ball_weights
 
 
 def parse_args():
@@ -28,34 +26,21 @@ def parse_args():
     parser.add_argument("--video", required=True, help="输入视频路径")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument(
-        "--weights",
-        default="weights/yolo5_last.pt",
-        help="网球 YOLO 权重，或通用 YOLO 权重",
+        "--backend",
+        default="auto",
+        choices=["auto", "tracknet", "yolo"],
+        help="auto：按权重文件名选择；高位小球用 tracknet",
     )
+    parser.add_argument("--weights", default=None, help="TrackNet .pth 或 YOLO .pt")
     parser.add_argument(
         "--coco-sports-ball",
         action="store_true",
-        help="使用 COCO 通用 sports ball（类别 32），没有网球专用权重时才开",
+        help="使用 COCO 通用 sports ball（仅 YOLO）",
     )
-    parser.add_argument("--conf", type=float, default=0.15, help="置信度门槛")
-    parser.add_argument(
-        "--imgsz",
-        type=int,
-        default=1280,
-        help="推理分辨率，高位小球建议 1280",
-    )
-    parser.add_argument(
-        "--max-frames",
-        type=int,
-        default=None,
-        help="只跑前 N 帧，调试用",
-    )
-    parser.add_argument(
-        "--trail",
-        type=int,
-        default=30,
-        help="可视化时保留最近多少帧轨迹",
-    )
+    parser.add_argument("--conf", type=float, default=0.15, help="YOLO 置信度门槛")
+    parser.add_argument("--imgsz", type=int, default=1280, help="YOLO 推理分辨率")
+    parser.add_argument("--max-frames", type=int, default=None, help="只跑前 N 帧")
+    parser.add_argument("--trail", type=int, default=30, help="可视化轨迹长度")
     return parser.parse_args()
 
 
@@ -63,11 +48,19 @@ def main():
     args = parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    if not os.path.isfile(args.weights):
+    weights = args.weights
+    backend = args.backend
+    if not weights:
+        weights, guessed = default_ball_weights()
+        if backend == "auto":
+            backend = guessed
+
+    if not os.path.isfile(weights):
         raise FileNotFoundError(
-            f"找不到球检测权重: {args.weights}\n"
-            "网球专用权重: https://drive.google.com/file/d/1UZwiG1jkWgce9lNhxJ2L0NVjX1vGM05U/view\n"
-            "保存为 weights/yolo5_last.pt"
+            f"找不到球检测权重: {weights}\n"
+            "TrackNet V1: https://huggingface.co/vishnushenoy09/tracknet-v1-tennis/resolve/main/tracknet_weights.pth\n"
+            "保存为 weights/tracknet.pth\n"
+            "V4 PyTorch 权重保存为 weights/tracknet_v4.pth"
         )
 
     cap = cv2.VideoCapture(args.video)
@@ -83,10 +76,11 @@ def main():
 
     print("video:", args.video)
     print("size:", width, height, "fps:", fps, "frames:", total)
-    print("weights:", args.weights, "coco_sports_ball:", args.coco_sports_ball)
+    print("backend:", backend, "weights:", weights)
 
-    tracker = BallTracker(
-        args.weights,
+    tracker = create_ball_tracker(
+        weights,
+        backend=backend,
         conf=args.conf,
         imgsz=args.imgsz,
         coco_sports_ball=args.coco_sports_ball,
@@ -112,6 +106,7 @@ def main():
     shot_frames = tracker.get_ball_shot_frames(filled, fps=fps)
     payload = tracker.to_json(filled, shot_frames, fps=fps)
     payload["video"] = args.video
+    payload["backend"] = getattr(tracker, "kind", backend)
     payload["raw_detect_count"] = sum(1 for d in raw if 1 in d)
     payload["filled_count"] = sum(1 for d in filled if 1 in d)
 
@@ -160,11 +155,6 @@ def main():
     print("shot_frames:", shot_frames)
     print("json:", json_path)
     print("video:", vis_path)
-    if payload["raw_detect_count"] < 0.2 * max(1, len(raw)):
-        print(
-            "提示：有效检测不足 20%。高位远景更适合 TrackNetV3，"
-            "不要继续死磕通用 YOLO。详见 test_court_ball.py 说明。"
-        )
 
 
 if __name__ == "__main__":

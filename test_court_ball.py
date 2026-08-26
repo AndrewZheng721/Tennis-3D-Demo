@@ -10,27 +10,12 @@
     overlay_first.jpg    第一帧截图，方便快速看球场点准不准
 
 权重（放到 Tennis-3D-Demo/weights/）：
-    court_heatmap.pth     球场热力图（优先）
+    court_heatmap.pth     球场热力图
         https://drive.google.com/file/d/1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG/view
-    keypoints_model.pth   ResNet 兜底，可没有
-    yolo5_last.pt         网球检测
-
-关于机位和要不要换模型（先看测试结果再决定）
-----------------------------------------
-球场：
-    当前方案 = tennis_analysis 的 ResNet50 回归 + 白线吸附 + 单应性。
-    适合：高位、从底线后方能看到整片场的转播机位。
-    不适合：水平机位、只拍近端半场、大幅摇镜。
-    不要微调这个 ResNet：训练数据全是高位全场，224×224 回归精度也到头了。
-    高位如果角点仍飘：下一步换 yastrebksv/TennisCourtDetector（热力图，640×360）。
-    水平机位：必须另训或另找模型，和现在这套不是同一任务。
-
-球：
-    当前方案 = 网球微调 YOLO + 时间插值。
-    比本仓库原来的 yolo26m sports ball 更针对网球。
-    高位远景、运动模糊仍会漏。若 raw 检测率 < 20%，不要继续微调 YOLOv5，
-    应换 TrackNet / TrackNetV3（多帧热力图，网球轨迹更稳）。
-    水平近景球很大，YOLO 通常够用。
+    tracknet.pth          网球 TrackNet（默认，高位小球）
+        https://huggingface.co/vishnushenoy09/tracknet-v1-tennis/resolve/main/tracknet_weights.pth
+    tracknet_v4.pth       可选，V4 Type A 的 PyTorch 权重
+    yolo5_last.pt         YOLO 兜底
 """
 
 import argparse
@@ -40,7 +25,7 @@ import os
 import cv2
 from tqdm import tqdm
 
-from src.ball.ball_tracker import BallTracker
+from src.ball.tracknet_tracker import create_ball_tracker, default_ball_weights
 from src.court.court_line_detector import (
     CourtLineDetector,
     choose_sample_ids,
@@ -61,9 +46,11 @@ def parse_args():
         "--court-weights",
         default="weights/keypoints_model.pth",
     )
+    parser.add_argument("--ball-weights", default=None)
     parser.add_argument(
-        "--ball-weights",
-        default="weights/yolo5_last.pt",
+        "--ball-backend",
+        default="auto",
+        choices=["auto", "tracknet", "yolo"],
     )
     parser.add_argument(
         "--coco-sports-ball",
@@ -134,12 +121,22 @@ def main():
     filled = None
     shot_frames = []
     if not args.skip_ball:
-        if not os.path.isfile(args.ball_weights):
+        ball_weights = args.ball_weights
+        ball_backend = args.ball_backend
+        if not ball_weights:
+            ball_weights, guessed = default_ball_weights()
+            if ball_backend == "auto":
+                ball_backend = guessed
+        if not os.path.isfile(ball_weights):
             raise FileNotFoundError(
-                f"找不到 {args.ball_weights}"
+                f"找不到 {ball_weights}\n"
+                "TrackNet: https://huggingface.co/vishnushenoy09/tracknet-v1-tennis/resolve/main/tracknet_weights.pth\n"
+                "保存为 weights/tracknet.pth"
             )
-        ball_tracker = BallTracker(
-            args.ball_weights,
+        print("ball:", ball_backend, ball_weights)
+        ball_tracker = create_ball_tracker(
+            ball_weights,
+            backend=ball_backend,
             conf=args.conf,
             imgsz=args.imgsz,
             coco_sports_ball=args.coco_sports_ball,
@@ -160,13 +157,12 @@ def main():
         shot_frames = ball_tracker.get_ball_shot_frames(filled, fps=fps)
         payload = ball_tracker.to_json(filled, shot_frames, fps=fps)
         payload["video"] = args.video
+        payload["backend"] = getattr(ball_tracker, "kind", ball_backend)
         payload["raw_detect_count"] = sum(1 for d in raw if 1 in d)
         with open(os.path.join(args.out, "ball_tracking.json"), "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         print("ball raw detections:", payload["raw_detect_count"], "/", len(raw))
         print("shot_frames:", shot_frames)
-        if payload["raw_detect_count"] < 0.2 * max(1, len(raw)):
-            print("球检测率偏低：高位远景优先换 TrackNetV3，而不是继续微调 YOLOv5。")
     else:
         ball_tracker = None
 

@@ -121,6 +121,74 @@ HOMO_CFGS = [
     [12, 9, 13, 11],
 ]
 
+HORIZ_SEGMENTS = [(0, 1), (2, 3), (8, 9), (10, 11), (4, 6), (5, 7)]
+VERT_SEGMENTS = [(0, 2), (1, 3), (4, 5), (6, 7), (8, 10), (9, 11)]
+
+
+def white_line_mask(image: np.ndarray) -> np.ndarray:
+    """转播画面里的球场线往往带一点蓝/绿，不能只靠 gray>155。"""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    by_hsv = cv2.inRange(hsv, (0, 0, 165), (180, 70, 255))
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    by_gray = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)[1]
+    mask = cv2.bitwise_or(by_hsv, by_gray)
+    kernel = np.ones((3, 3), np.uint8)
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+
+def _sample_line_offsets(mask: np.ndarray, pts: np.ndarray, pairs, along_x: bool):
+    h, w = mask.shape[:2]
+    band = 32
+    offsets = []
+    for a, b in pairs:
+        p0, p1 = pts[a], pts[b]
+        for t in np.linspace(0.12, 0.88, 18):
+            px = float(p0[0] * (1.0 - t) + p1[0] * t)
+            py = float(p0[1] * (1.0 - t) + p1[1] * t)
+            xi, yi = int(round(px)), int(round(py))
+            if along_x:
+                if not (0 <= yi < h):
+                    continue
+                x0, x1 = max(0, xi - band), min(w, xi + band + 1)
+                strip = mask[yi, x0:x1]
+                hits = np.where(strip > 0)[0]
+                if hits.size == 0:
+                    continue
+                wx = x0 + int(hits[np.argmin(np.abs(hits - (xi - x0)))])
+                offsets.append(wx - px)
+            else:
+                if not (0 <= xi < w):
+                    continue
+                y0, y1 = max(0, yi - band), min(h, yi + band + 1)
+                strip = mask[y0:y1, xi]
+                hits = np.where(strip > 0)[0]
+                if hits.size == 0:
+                    continue
+                wy = y0 + int(hits[np.argmin(np.abs(hits - (yi - y0)))])
+                offsets.append(wy - py)
+    return offsets
+
+
+def align_keypoints_to_white_lines(image: np.ndarray, keypoints: np.ndarray) -> np.ndarray:
+    """整体平移网格，吸到真实白线上。
+
+    高位转播里形状对、整网下沉几像素，是热力图峰值/霍夫圆的系统偏差，
+    不是「画在白线内沿」的设计。这里用白线掩膜估计 (dx, dy)。
+    """
+    pts = keypoints.reshape(14, 2).astype(np.float32)
+    mask = white_line_mask(image)
+    dys = _sample_line_offsets(mask, pts, HORIZ_SEGMENTS, along_x=False)
+    dxs = _sample_line_offsets(mask, pts, VERT_SEGMENTS, along_x=True)
+    dx = float(np.median(dxs)) if len(dxs) >= 10 else 0.0
+    dy = float(np.median(dys)) if len(dys) >= 10 else 0.0
+    dx = float(np.clip(dx, -30.0, 30.0))
+    dy = float(np.clip(dy, -30.0, 30.0))
+    if abs(dx) < 0.4 and abs(dy) < 0.4:
+        return keypoints
+    pts[:, 0] += dx
+    pts[:, 1] += dy
+    return pts.flatten().astype(np.float32)
+
 
 @dataclass
 class CourtDetection:
@@ -303,8 +371,7 @@ class CourtLineDetector:
         crop = image[y1:y2, x1:x2]
         if crop.size == 0:
             return float(x), float(y)
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 155, 255, cv2.THRESH_BINARY)
+        binary = white_line_mask(crop)
         lines = cv2.HoughLinesP(
             binary, 1, np.pi / 180, 30, minLineLength=10, maxLineGap=30
         )
@@ -461,9 +528,12 @@ class CourtLineDetector:
         keypoints, H, H_inv = self.heatmap.predict(image)
         if keypoints is None or np.any(~np.isfinite(keypoints)):
             return None
+        keypoints = align_keypoints_to_white_lines(image, keypoints)
+        keypoints, H, H_inv = self._homography_snap(keypoints)
         keypoints = self._refine(image, keypoints)
-        if H is None:
-            keypoints, H, H_inv = self._homography_snap(keypoints)
+        keypoints, H2, H_inv2 = self._homography_snap(keypoints)
+        if H2 is not None:
+            H, H_inv = H2, H_inv2
         mask, _ = adaptive_surface_mask(image)
         ok, reason = self.assess_quality(keypoints, image.shape)
         if mask is not None:
@@ -554,10 +624,7 @@ class CourtLineDetector:
                 (0, 0, 255),
                 2,
             )
-        tag = (
-            f"{detection.method} "
-            + ("ok" if detection.quality_ok else f"warn: {detection.quality_reason}")
-        )
+        tag = f"{detection.method} ok" if detection.quality_ok else f"{detection.method} warn"
         cv2.putText(
             output,
             tag[:70],
