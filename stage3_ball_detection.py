@@ -132,11 +132,11 @@ def main():
                 break
             box = filled[frame_id].get(1)
             if box:
-                cx = int((box[0] + box[2]) / 2)
-                cy = int((box[1] + box[3]) / 2)
-                trail.append((cx, cy))
-                if len(trail) > args.trail:
-                    trail = trail[-args.trail :]
+                trail.append((int((box[0] + box[2]) / 2), int((box[1] + box[3]) / 2)))
+            elif trail and trail[-1] is not None:
+                trail.append(None)
+            if len(trail) > args.trail:
+                trail = trail[-args.trail :]
             vis = tracker.draw_frame(
                 frame,
                 box,

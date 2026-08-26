@@ -43,6 +43,94 @@ import pandas as pd
 from ultralytics import YOLO
 
 
+def _refine_track(dets, max_step, max_gap, gap_speed, min_track=5):
+    n = len(dets)
+    pts = []
+    boxes = []
+    for item in dets:
+        box = item.get(1, [])
+        if box and len(box) >= 4 and np.isfinite(box[0]):
+            pts.append(((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0))
+            boxes.append(list(box))
+        else:
+            pts.append((None, None))
+            boxes.append(None)
+
+    def dist(i, j):
+        if pts[i][0] is None or pts[j][0] is None:
+            return -1.0
+        return float(np.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]))
+
+    for i in range(1, n):
+        d = dist(i - 1, i)
+        if d > max_step:
+            nxt = dist(i, i + 1) if i + 1 < n else -1.0
+            if nxt > max_step or nxt < 0:
+                pts[i] = (None, None)
+                boxes[i] = None
+            elif dist(i - 2, i - 1) < 0 if i >= 2 else True:
+                pts[i - 1] = (None, None)
+                boxes[i - 1] = None
+
+    for i in range(2, n):
+        if pts[i][0] is None or pts[i - 1][0] is None or pts[i - 2][0] is None:
+            continue
+        ax = pts[i][0] - 2 * pts[i - 1][0] + pts[i - 2][0]
+        ay = pts[i][1] - 2 * pts[i - 1][1] + pts[i - 2][1]
+        if float(np.hypot(ax, ay)) > max_step:
+            pts[i] = (None, None)
+            boxes[i] = None
+
+    missing = [0 if p[0] is not None else 1 for p in pts]
+    groups = []
+    i = 0
+    while i < n:
+        j = i
+        while j < n and missing[j] == missing[i]:
+            j += 1
+        groups.append((missing[i], i, j))
+        i = j
+
+    ranges = []
+    start = 0
+    for gi, (k, a, b) in enumerate(groups):
+        if k == 1 and gi > 0 and gi < len(groups) - 1:
+            left = a - 1
+            right = b
+            gap = b - a
+            d = dist(left, right)
+            if gap >= max_gap or (d > 0 and d / gap > gap_speed):
+                if a - start > min_track:
+                    ranges.append((start, a))
+                start = b - 1 if b > a else b
+    if n - start > min_track:
+        ranges.append((start, n))
+
+    out = [{} for _ in range(n)]
+    for a, b in ranges:
+        xs = np.array([np.nan if pts[i][0] is None else pts[i][0] for i in range(a, b)])
+        ys = np.array([np.nan if pts[i][1] is None else pts[i][1] for i in range(a, b)])
+        idx = np.arange(b - a)
+        good = np.isfinite(xs)
+        if good.sum() < 2:
+            for i in range(a, b):
+                if boxes[i] is not None:
+                    out[i] = {1: boxes[i]}
+            continue
+        xs[~good] = np.interp(idx[~good], idx[good], xs[good])
+        ys[~good] = np.interp(idx[~good], idx[good], ys[good])
+        r = 8.0
+        for i in range(a, b):
+            if boxes[i] is not None:
+                r = (boxes[i][2] - boxes[i][0]) / 2.0
+                break
+        for i in range(a, b):
+            cx, cy = float(xs[i - a]), float(ys[i - a])
+            conf = boxes[i][4] if boxes[i] is not None and len(boxes[i]) > 4 else 0.5
+            out[i] = {1: [cx - r, cy - r, cx + r, cy + r, float(conf)]}
+    return out
+
+
 class BallTracker:
     """逐帧检测网球，并对漏检做时间插值。"""
 
@@ -66,11 +154,12 @@ class BallTracker:
         self.coco_sports_ball = coco_sports_ball
         self._prev_center = None
         self._misses = 0
+        self.diag = None
 
     def reset(self):
-        """换一段视频前调用，清掉上一支球的位置记忆。"""
         self._prev_center = None
         self._misses = 0
+        self.diag = None
 
     def _candidates(self, frame: np.ndarray):
         kwargs = {
@@ -99,7 +188,8 @@ class BallTracker:
     def detect_frame(self, frame: np.ndarray) -> Dict[int, List[float]]:
         """检测单帧。有上一帧位置时，优先跟近处的框，而不是全局最高分。"""
         h, w = frame.shape[:2]
-        max_jump = 0.12 * float(np.hypot(w, h))
+        self.diag = float(np.hypot(w, h))
+        max_jump = 0.07 * self.diag
         cands = self._candidates(frame)
         if not cands:
             self._misses += 1
@@ -163,51 +253,20 @@ class BallTracker:
     def interpolate_ball_positions(
         self, ball_positions: List[Dict[int, List[float]]]
     ) -> List[Dict[int, List[float]]]:
-        """用前后帧把漏检补上。
+        """去掉飞点，按回合拆段，只在同一段里插值。
 
-        pandas.interpolate 默认按时间下标做线性插值。
-        开头连续缺失时用 bfill（用后面第一个有效值往前填），
-        避免轨迹一开始就是空的。
+        乱轨迹通常不是「漏了几帧」，而是：
+        1. 误检跳到鞋/线/广告牌，再被直线连回去；
+        2. 中间很多空帧，画轨迹时仍把两端连在一起。
+        做法来自 yastrebksv/TrackNet：先按速度丢掉孤立跳点，
+        空档太大或空档两端离太远就拆成两段，只在段内线性补点。
         """
-        rows = []
-        confs = []
-        for item in ball_positions:
-            box = item.get(1, [])
-            if box and len(box) >= 4 and np.isfinite(box[0]):
-                rows.append(box[:4])
-                confs.append(box[4] if len(box) > 4 else 1.0)
-            else:
-                rows.append([np.nan, np.nan, np.nan, np.nan])
-                confs.append(np.nan)
-
-        df = pd.DataFrame(rows, columns=["x1", "y1", "x2", "y2"])
-        df = df.interpolate(limit=8)
-        conf_s = pd.Series(confs).interpolate(limit=8)
-
-        filled = []
-        prev_c = None
-        for i, row in df.iterrows():
-            if row.isna().any():
-                filled.append({})
-                continue
-            box = [
-                float(row["x1"]),
-                float(row["y1"]),
-                float(row["x2"]),
-                float(row["y2"]),
-                float(conf_s.iloc[i]) if not np.isnan(conf_s.iloc[i]) else 0.0,
-            ]
-            cx = (box[0] + box[2]) / 2.0
-            cy = (box[1] + box[3]) / 2.0
-            if prev_c is not None:
-                jump = float(np.hypot(cx - prev_c[0], cy - prev_c[1]))
-                if jump > 220:
-                    filled.append({})
-                    prev_c = None
-                    continue
-            filled.append({1: box})
-            prev_c = (cx, cy)
-        return filled
+        diag = float(getattr(self, "diag", 0) or 0)
+        max_step = 0.07 * diag if diag > 1 else 120.0
+        gap_speed = 0.05 * diag if diag > 1 else 80.0
+        return _refine_track(
+            ball_positions, max_step=max_step, max_gap=4, gap_speed=gap_speed
+        )
 
     def get_ball_shot_frames(
         self, ball_positions: List[Dict[int, List[float]]], fps: float = 30.0
@@ -305,10 +364,21 @@ class BallTracker:
         """画当前框、最近一段轨迹、击球标记。"""
         vis = frame.copy()
         h, w = vis.shape[:2]
-        max_jump = 0.12 * float(np.hypot(w, h))
+        max_jump = 0.06 * float(np.hypot(w, h))
         if len(trail) >= 2:
             seg = []
             for p in trail:
+                if p is None:
+                    if len(seg) >= 2:
+                        cv2.polylines(
+                            vis,
+                            [np.array(seg, dtype=np.int32).reshape(-1, 1, 2)],
+                            False,
+                            (0, 255, 255),
+                            2,
+                        )
+                    seg = []
+                    continue
                 if not seg:
                     seg = [p]
                     continue

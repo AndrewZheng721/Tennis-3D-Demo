@@ -67,10 +67,24 @@ def _largest_blob_center(binary: np.ndarray):
 def decode_v1_from_argmax(hm: np.ndarray, orig_w: int, orig_h: int):
     hm_u8 = hm.astype(np.uint8)
     _, binary = cv2.threshold(hm_u8, 127, 255, cv2.THRESH_BINARY)
-    blob = _largest_blob_center(binary)
-    if blob is None:
-        return None
-    x, y, conf = blob
+    circles = cv2.HoughCircles(
+        binary,
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=1,
+        param1=50,
+        param2=2,
+        minRadius=2,
+        maxRadius=7,
+    )
+    if circles is not None and len(circles[0]) == 1:
+        x, y = float(circles[0][0][0]), float(circles[0][0][1])
+        conf = 1.0
+    else:
+        blob = _largest_blob_center(binary)
+        if blob is None:
+            return None
+        x, y, conf = blob
     sx, sy = orig_w / float(V1_W), orig_h / float(V1_H)
     return (x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5, conf
 
@@ -116,10 +130,16 @@ class TrackNetBallTracker:
         self.model.eval()
         self._buf: List[np.ndarray] = []
         self._orig_size = None
+        self._prev_center = None
+        self._misses = 0
+        self.diag = None
 
     def reset(self):
         self._buf = []
         self._orig_size = None
+        self._prev_center = None
+        self._misses = 0
+        self.diag = None
 
     def _stack_triplet(self, frames: List[np.ndarray]) -> torch.Tensor:
         seq = frames[::-1] if self.kind == "v1" else frames
@@ -147,15 +167,30 @@ class TrackNetBallTracker:
         )
 
     def detect_frame(self, frame: np.ndarray) -> Dict[int, List[float]]:
+        h, w = frame.shape[:2]
+        self.diag = float(np.hypot(w, h))
+        max_jump = 0.07 * self.diag
         self._buf.append(frame)
         if len(self._buf) < 3:
             return {}
         self._buf = self._buf[-3:]
         pred = self._predict_triplet(self._buf)
         if pred is None:
+            self._misses += 1
+            if self._misses > 8:
+                self._prev_center = None
             return {}
         cx, cy, conf = pred
-        r = max(6.0, 0.004 * float(max(frame.shape[0], frame.shape[1])))
+        if self._prev_center is not None:
+            dist = float(np.hypot(cx - self._prev_center[0], cy - self._prev_center[1]))
+            if dist > max_jump:
+                self._misses += 1
+                if self._misses > 8:
+                    self._prev_center = None
+                return {}
+        self._prev_center = (cx, cy)
+        self._misses = 0
+        r = max(6.0, 0.004 * float(max(h, w)))
         return {1: [cx - r, cy - r, cx + r, cy + r, float(conf)]}
 
     interpolate_ball_positions = BallTracker.interpolate_ball_positions
