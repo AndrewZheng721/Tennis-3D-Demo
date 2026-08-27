@@ -59,21 +59,37 @@ def detect_tracknet_kind(state: dict) -> str:
     )
 
 
-def _largest_blob_center(binary: np.ndarray):
-    n, labels, stats, cents = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    if n <= 1:
-        return None
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    idx = 1 + int(np.argmax(areas))
-    if stats[idx, cv2.CC_STAT_AREA] < 3:
-        return None
-    ys, xs = np.where(labels == idx)
-    return float(xs.mean()), float(ys.mean()), float(min(1.0, stats[idx, cv2.CC_STAT_AREA] / 40.0))
+def _compact_ball_blob(binary: np.ndarray, hint=None):
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    best = None
+    best_score = -1.0
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if area < 3 or area > 70 or bw > 16 or bh > 16:
+            continue
+        fill = area / float(max(bw * bh, 1))
+        if fill < 0.35:
+            continue
+        cx = float(stats[i, cv2.CC_STAT_LEFT]) + bw * 0.5
+        cy = float(stats[i, cv2.CC_STAT_TOP]) + bh * 0.5
+        score = fill * min(area, 40.0)
+        if hint is not None:
+            score -= 0.02 * float(np.hypot(cx - hint[0], cy - hint[1]))
+        if score > best_score:
+            best_score = score
+            best = (cx, cy, float(min(1.0, fill)))
+    return best
 
 
-def decode_v1_from_argmax(hm: np.ndarray, orig_w: int, orig_h: int):
+def decode_v1_from_argmax(hm: np.ndarray, orig_w: int, orig_h: int, hint=None):
     hm_u8 = hm.astype(np.uint8)
     _, binary = cv2.threshold(hm_u8, 127, 255, cv2.THRESH_BINARY)
+    hx = hy = None
+    if hint is not None:
+        hx = hint[0] * V1_W / float(orig_w)
+        hy = hint[1] * V1_H / float(orig_h)
     circles = cv2.HoughCircles(
         binary,
         cv2.HOUGH_GRADIENT,
@@ -84,11 +100,19 @@ def decode_v1_from_argmax(hm: np.ndarray, orig_w: int, orig_h: int):
         minRadius=2,
         maxRadius=7,
     )
-    if circles is not None and len(circles[0]) == 1:
-        x, y = float(circles[0][0][0]), float(circles[0][0][1])
-        conf = 1.0
-    else:
-        blob = _largest_blob_center(binary)
+    x = y = conf = None
+    if circles is not None and len(circles[0]) > 0:
+        cands = circles[0]
+        if hx is not None:
+            d = [(float(np.hypot(c[0] - hx, c[1] - hy)), c) for c in cands]
+            dist, c = min(d, key=lambda t: t[0])
+            if dist < 40.0:
+                x, y, conf = float(c[0]), float(c[1]), 1.0
+        else:
+            c = cands[0]
+            x, y, conf = float(c[0]), float(c[1]), 1.0
+    if x is None:
+        blob = _compact_ball_blob(binary, hint=(hx, hy) if hx is not None else None)
         if blob is None:
             return None
         x, y, conf = blob
@@ -96,15 +120,17 @@ def decode_v1_from_argmax(hm: np.ndarray, orig_w: int, orig_h: int):
     return (x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5, conf
 
 
-def decode_float_heatmap(hm: np.ndarray, orig_w: int, orig_h: int, in_w: int, in_h: int, thresh: float):
+def decode_float_heatmap(hm: np.ndarray, orig_w: int, orig_h: int, in_w: int, in_h: int, thresh: float, hint=None):
     if float(hm.max()) < thresh:
         return None
     binary = (hm >= thresh).astype(np.uint8) * 255
-    blob = _largest_blob_center(binary)
+    hx = hy = None
+    if hint is not None:
+        hx = hint[0] * in_w / float(orig_w)
+        hy = hint[1] * in_h / float(orig_h)
+    blob = _compact_ball_blob(binary, hint=(hx, hy) if hx is not None else None)
     if blob is None:
-        y, x = np.unravel_index(int(np.argmax(hm)), hm.shape)
-        conf = float(hm[y, x])
-        blob = (float(x), float(y), conf)
+        return None
     x, y, conf = blob
     sx, sy = orig_w / float(in_w), orig_h / float(in_h)
     return (x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5, float(conf)
@@ -138,15 +164,25 @@ class TrackNetBallTracker:
         self._buf: List[np.ndarray] = []
         self._orig_size = None
         self._prev_center = None
+        self._vel = (0.0, 0.0)
+        self._reacq = None
         self._misses = 0
+        self._court = None
         self.diag = None
 
     def reset(self):
         self._buf = []
         self._orig_size = None
         self._prev_center = None
+        self._vel = (0.0, 0.0)
+        self._reacq = None
         self._misses = 0
         self.diag = None
+
+    def set_court(self, keypoints_xy: np.ndarray):
+        corners = np.asarray(keypoints_xy, dtype=np.float32).reshape(-1, 2)[[0, 1, 3, 2]]
+        c = corners.mean(axis=0)
+        self._court = (corners - c) * 1.3 + c
 
     def _stack_triplet(self, frames: List[np.ndarray]) -> torch.Tensor:
         seq = frames[::-1] if self.kind == "v1" else frames
@@ -163,15 +199,29 @@ class TrackNetBallTracker:
     def _predict_triplet(self, frames: List[np.ndarray]) -> Optional[Tuple[float, float, float]]:
         h, w = frames[-1].shape[:2]
         inp = self._stack_triplet(frames)
+        hint = None
+        if self._prev_center is not None:
+            hint = (
+                self._prev_center[0] + self._vel[0],
+                self._prev_center[1] + self._vel[1],
+            )
         with torch.no_grad():
             out = self.model(inp)
         if self.kind == "v1":
             hm = out.argmax(dim=1).detach().cpu().numpy()[0].reshape(self.in_h, self.in_w)
-            return decode_v1_from_argmax(hm, w, h)
+            return decode_v1_from_argmax(hm, w, h, hint=hint)
         heatmaps = out.detach().cpu().numpy()[0]
         return decode_float_heatmap(
-            heatmaps[2], w, h, self.in_w, self.in_h, self.threshold
+            heatmaps[2], w, h, self.in_w, self.in_h, self.threshold, hint=hint
         )
+
+    def _reject(self) -> Dict[int, List[float]]:
+        self._misses += 1
+        if self._misses > 6:
+            self._prev_center = None
+            self._vel = (0.0, 0.0)
+            self._reacq = None
+        return {}
 
     def detect_frame(self, frame: np.ndarray) -> Dict[int, List[float]]:
         h, w = frame.shape[:2]
@@ -182,8 +232,34 @@ class TrackNetBallTracker:
         self._buf = self._buf[-3:]
         pred = self._predict_triplet(self._buf)
         if pred is None:
-            return {}
+            return self._reject()
         cx, cy, conf = pred
+        if self._court is not None and cv2.pointPolygonTest(self._court, (cx, cy), False) < 0:
+            return self._reject()
+        if self._prev_center is not None:
+            px = self._prev_center[0] + self._vel[0]
+            py = self._prev_center[1] + self._vel[1]
+            speed = float(np.hypot(self._vel[0], self._vel[1]))
+            gate = max(55.0, 0.04 * self.diag, 2.5 * speed)
+            if float(np.hypot(cx - px, cy - py)) > gate:
+                return self._reject()
+            self._vel = (
+                0.65 * self._vel[0] + 0.35 * (cx - self._prev_center[0]),
+                0.65 * self._vel[1] + 0.35 * (cy - self._prev_center[1]),
+            )
+            self._prev_center = (cx, cy)
+            self._misses = 0
+        else:
+            if self._reacq is None:
+                self._reacq = (cx, cy)
+                return {}
+            if float(np.hypot(cx - self._reacq[0], cy - self._reacq[1])) > 0.05 * self.diag:
+                self._reacq = (cx, cy)
+                return {}
+            self._vel = (cx - self._reacq[0], cy - self._reacq[1])
+            self._prev_center = (cx, cy)
+            self._reacq = None
+            self._misses = 0
         r = max(6.0, 0.004 * float(max(h, w)))
         return {1: [cx - r, cy - r, cx + r, cy + r, float(conf)]}
 

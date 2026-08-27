@@ -148,6 +148,8 @@ def main():
             coco_sports_ball=args.coco_sports_ball,
         )
         ball_tracker.reset()
+        if detection is not None and hasattr(ball_tracker, "set_court"):
+            ball_tracker.set_court(detection.keypoints_xy)
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         raw = []
         with tqdm(total=total, desc="detect ball") as pbar:
@@ -211,7 +213,7 @@ def main():
                     )
                 elif trail and trail[-1] is not None:
                     trail.append(None)
-                trail = trail[-40:]
+                trail = trail[-16:]
                 vis = ball_tracker.draw_frame(
                     vis, box, trail, frame_id, is_shot=frame_id in shot_set
                 )
