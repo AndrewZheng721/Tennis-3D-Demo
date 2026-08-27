@@ -64,6 +64,58 @@ def _smooth_xy(xs, ys, win=9):
         )
 
 
+def _associate(pts, diag, max_coast=12):
+    n = len(pts)
+    out = [(None, None)] * n
+    pos = None
+    vel = np.zeros(2, dtype=np.float64)
+    coast = 0
+    pending = None
+    acq = max(40.0, 0.04 * diag)
+    for i in range(n):
+        det = pts[i]
+        if pos is None:
+            if det[0] is None:
+                pending = None
+                continue
+            cur = np.array(det, dtype=np.float64)
+            if pending is None:
+                pending = cur
+                continue
+            if float(np.hypot(*(cur - pending))) <= acq:
+                vel = cur - pending
+                pos = cur
+                out[i] = (float(pos[0]), float(pos[1]))
+                pending = None
+            else:
+                pending = cur
+            continue
+        pred = pos + vel
+        speed = float(np.hypot(*vel))
+        gate = max(45.0, 0.032 * diag, 2.6 * speed)
+        hit_r = max(36.0, 0.018 * diag)
+        if det[0] is not None:
+            cur = np.array(det, dtype=np.float64)
+            d_pred = float(np.hypot(*(cur - pred)))
+            d_last = float(np.hypot(*(cur - pos)))
+            if d_pred <= gate or (coast == 0 and d_last <= hit_r):
+                vel = 0.5 * vel + 0.5 * (cur - pos)
+                pos = cur
+                coast = 0
+                out[i] = (float(pos[0]), float(pos[1]))
+                continue
+        coast += 1
+        if coast > max_coast:
+            pos = None
+            vel[:] = 0
+            pending = None
+            continue
+        pos = pred
+        vel *= 0.9
+        out[i] = (float(pos[0]), float(pos[1]))
+    return out
+
+
 def _refine_track(dets, max_step, max_gap, gap_speed, min_track=5):
     n = len(dets)
     pts = []
@@ -76,79 +128,40 @@ def _refine_track(dets, max_step, max_gap, gap_speed, min_track=5):
         else:
             pts.append((None, None))
             boxes.append(None)
-
-    def dist(i, j):
-        if i < 0 or j >= n or pts[i][0] is None or pts[j][0] is None:
-            return -1.0
-        return float(np.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]))
-
-    spike = max_step * 0.18
-    neighbor = max_step * 0.35
-    for i in range(1, n - 1):
-        d1 = dist(i - 1, i)
-        d2 = dist(i, i + 1)
-        dnb = dist(i - 1, i + 1)
-        if dnb > 0 and dnb < neighbor and d1 > spike and d2 > spike:
-            pts[i] = (None, None)
-            boxes[i] = None
-
-    for i in range(1, n):
-        d = dist(i - 1, i)
-        if d <= max_step:
-            continue
-        nxt = dist(i, i + 1) if i + 1 < n else -1.0
-        if nxt > max_step or nxt < 0:
-            pts[i] = (None, None)
-            boxes[i] = None
-        elif i >= 2 and dist(i - 2, i - 1) < 0:
-            pts[i - 1] = (None, None)
-            boxes[i - 1] = None
-
-    missing = [0 if p[0] is not None else 1 for p in pts]
-    groups = []
+    diag = max_step / 0.10 if max_step > 1 else 1600.0
+    tracked = _associate(pts, diag)
+    out = [{} for _ in range(n)]
     i = 0
     while i < n:
-        j = i
-        while j < n and missing[j] == missing[i]:
-            j += 1
-        groups.append((missing[i], i, j))
-        i = j
-
-    ranges = []
-    start = 0
-    for gi, (k, a, b) in enumerate(groups):
-        if k == 1 and gi > 0 and gi < len(groups) - 1:
-            gap = b - a
-            d = dist(a - 1, b)
-            if gap >= max_gap or (d > 0 and d / max(gap, 1) > gap_speed):
-                if a - start >= min_track:
-                    ranges.append((start, a))
-                start = b
-    if n - start >= min_track:
-        ranges.append((start, n))
-    if not ranges:
-        return [{} for _ in range(n)]
-
-    out = [{} for _ in range(n)]
-    for a, b in ranges:
-        xs = np.array([np.nan if pts[i][0] is None else pts[i][0] for i in range(a, b)])
-        ys = np.array([np.nan if pts[i][1] is None else pts[i][1] for i in range(a, b)])
-        idx = np.arange(b - a)
-        good = np.isfinite(xs)
-        if good.sum() < 2:
+        if tracked[i][0] is None:
+            i += 1
             continue
-        xs[~good] = np.interp(idx[~good], idx[good], xs[good])
-        ys[~good] = np.interp(idx[~good], idx[good], ys[good])
-        xs, ys = _smooth_xy(xs, ys)
-        r = 8.0
-        for i in range(a, b):
-            if boxes[i] is not None:
-                r = max(6.0, (boxes[i][2] - boxes[i][0]) / 2.0)
-                break
-        for i in range(a, b):
-            cx, cy = float(xs[i - a]), float(ys[i - a])
-            conf = boxes[i][4] if boxes[i] is not None and len(boxes[i]) > 4 else 0.5
-            out[i] = {1: [cx - r, cy - r, cx + r, cy + r, float(conf)]}
+        j = i + 1
+        while j < n and tracked[j][0] is not None:
+            j += 1
+        if j - i >= min_track:
+            xs = np.array([tracked[k][0] for k in range(i, j)], dtype=np.float64)
+            ys = np.array([tracked[k][1] for k in range(i, j)], dtype=np.float64)
+            xs, ys = _smooth_xy(xs, ys)
+            dx = np.diff(xs)
+            dy = np.diff(ys)
+            step = np.hypot(dx, dy)
+            path = float(step.sum()) if len(step) else 0.0
+            disp = float(np.hypot(xs[-1] - xs[0], ys[-1] - ys[0]))
+            med = float(np.median(step)) if len(step) else 0.0
+            if (med < 4.5 and (j - i) > 10) or (path > 60 and disp / max(path, 1.0) < 0.12):
+                i = j
+                continue
+            r = 8.0
+            for k in range(i, j):
+                if boxes[k] is not None:
+                    r = max(6.0, (boxes[k][2] - boxes[k][0]) / 2.0)
+                    break
+            for t, k in enumerate(range(i, j)):
+                cx, cy = float(xs[t]), float(ys[t])
+                conf = boxes[k][4] if boxes[k] is not None and len(boxes[k]) > 4 else 0.45
+                out[k] = {1: [cx - r, cy - r, cx + r, cy + r, float(conf)]}
+        i = j
     return out
 
 
