@@ -209,11 +209,11 @@ def main():
                 box = filled[frame_id].get(1)
                 if box:
                     trail.append(
-                        (int((box[0] + box[2]) / 2), int((box[1] + box[3]) / 2))
+                        ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
                     )
                 elif trail and trail[-1] is not None:
                     trail.append(None)
-                trail = trail[-16:]
+                trail = trail[-36:]
                 vis = ball_tracker.draw_frame(
                     vis, box, trail, frame_id, is_shot=frame_id in shot_set
                 )

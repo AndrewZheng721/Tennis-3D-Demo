@@ -43,7 +43,28 @@ import pandas as pd
 from ultralytics import YOLO
 
 
-def _refine_track(dets, max_step, max_gap, gap_speed, min_track=3):
+def _smooth_xy(xs, ys, win=9):
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    n = len(xs)
+    if n < 5:
+        return xs, ys
+    w = min(win, n if n % 2 == 1 else n - 1)
+    if w < 5:
+        return xs, ys
+    try:
+        from scipy.signal import savgol_filter
+        poly = 2 if w > 3 else 1
+        return savgol_filter(xs, w, poly, mode="interp"), savgol_filter(ys, w, poly, mode="interp")
+    except Exception:
+        k = np.ones(w) / w
+        pad = w // 2
+        return np.convolve(np.pad(xs, pad, mode="edge"), k, mode="valid"), np.convolve(
+            np.pad(ys, pad, mode="edge"), k, mode="valid"
+        )
+
+
+def _refine_track(dets, max_step, max_gap, gap_speed, min_track=5):
     n = len(dets)
     pts = []
     boxes = []
@@ -60,6 +81,16 @@ def _refine_track(dets, max_step, max_gap, gap_speed, min_track=3):
         if i < 0 or j >= n or pts[i][0] is None or pts[j][0] is None:
             return -1.0
         return float(np.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]))
+
+    spike = max_step * 0.18
+    neighbor = max_step * 0.35
+    for i in range(1, n - 1):
+        d1 = dist(i - 1, i)
+        d2 = dist(i, i + 1)
+        dnb = dist(i - 1, i + 1)
+        if dnb > 0 and dnb < neighbor and d1 > spike and d2 > spike:
+            pts[i] = (None, None)
+            boxes[i] = None
 
     for i in range(1, n):
         d = dist(i - 1, i)
@@ -105,12 +136,10 @@ def _refine_track(dets, max_step, max_gap, gap_speed, min_track=3):
         idx = np.arange(b - a)
         good = np.isfinite(xs)
         if good.sum() < 2:
-            for i in range(a, b):
-                if boxes[i] is not None:
-                    out[i] = {1: boxes[i]}
             continue
         xs[~good] = np.interp(idx[~good], idx[good], xs[good])
         ys[~good] = np.interp(idx[~good], idx[good], ys[good])
+        xs, ys = _smooth_xy(xs, ys)
         r = 8.0
         for i in range(a, b):
             if boxes[i] is not None:
@@ -254,10 +283,10 @@ class BallTracker:
         空档太大或空档两端离太远就拆成两段，只在段内线性补点。
         """
         diag = float(getattr(self, "diag", 0) or 0)
-        max_step = 0.12 * diag if diag > 1 else 180.0
-        gap_speed = 0.06 * diag if diag > 1 else 90.0
+        max_step = 0.10 * diag if diag > 1 else 160.0
+        gap_speed = 0.07 * diag if diag > 1 else 110.0
         return _refine_track(
-            ball_positions, max_step=max_step, max_gap=4, gap_speed=gap_speed, min_track=3
+            ball_positions, max_step=max_step, max_gap=8, gap_speed=gap_speed, min_track=5
         )
 
     def get_ball_shot_frames(
@@ -356,7 +385,7 @@ class BallTracker:
         """画当前框、最近一段轨迹、击球标记。"""
         vis = frame.copy()
         h, w = vis.shape[:2]
-        max_jump = 0.06 * float(np.hypot(w, h))
+        max_jump = 0.10 * float(np.hypot(w, h))
         if len(trail) >= 2:
             seg = []
             for p in trail:
@@ -368,6 +397,7 @@ class BallTracker:
                             False,
                             (0, 255, 255),
                             2,
+                            cv2.LINE_AA,
                         )
                     seg = []
                     continue
@@ -382,6 +412,7 @@ class BallTracker:
                             False,
                             (0, 255, 255),
                             2,
+                            cv2.LINE_AA,
                         )
                     seg = [p]
                 else:
@@ -393,6 +424,7 @@ class BallTracker:
                     False,
                     (0, 255, 255),
                     2,
+                    cv2.LINE_AA,
                 )
         if bbox_with_conf:
             x1, y1, x2, y2 = map(int, bbox_with_conf[:4])
