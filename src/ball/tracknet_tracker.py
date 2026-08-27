@@ -24,10 +24,17 @@ TRACKNET_V1_DRIVE = "https://drive.google.com/file/d/1XEYZ4myUN7QT-NeBYJI0xteLsv
 
 
 def _load_state(path: str):
+    size = os.path.getsize(path)
+    if size < 5_000_000:
+        raise RuntimeError(
+            f"{path} 只有 {size} 字节，权重没下完整。完整文件大约 40MB。\n"
+            f"重新下载:\n  wget -O weights/tracknet.pth \"{TRACKNET_V1_URL}\"\n"
+            f"或网盘: {TRACKNET_V1_DRIVE}"
+        )
     try:
         state = torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        state = torch.load(path, map_location="cpu")
+    except Exception:
+        state = torch.load(path, map_location="cpu", weights_only=False)
     if isinstance(state, dict) and "model_state_dict" in state:
         state = state["model_state_dict"]
     if isinstance(state, dict) and "state_dict" in state:
@@ -169,27 +176,14 @@ class TrackNetBallTracker:
     def detect_frame(self, frame: np.ndarray) -> Dict[int, List[float]]:
         h, w = frame.shape[:2]
         self.diag = float(np.hypot(w, h))
-        max_jump = 0.07 * self.diag
         self._buf.append(frame)
         if len(self._buf) < 3:
             return {}
         self._buf = self._buf[-3:]
         pred = self._predict_triplet(self._buf)
         if pred is None:
-            self._misses += 1
-            if self._misses > 8:
-                self._prev_center = None
             return {}
         cx, cy, conf = pred
-        if self._prev_center is not None:
-            dist = float(np.hypot(cx - self._prev_center[0], cy - self._prev_center[1]))
-            if dist > max_jump:
-                self._misses += 1
-                if self._misses > 8:
-                    self._prev_center = None
-                return {}
-        self._prev_center = (cx, cy)
-        self._misses = 0
         r = max(6.0, 0.004 * float(max(h, w)))
         return {1: [cx - r, cy - r, cx + r, cy + r, float(conf)]}
 

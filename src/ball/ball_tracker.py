@@ -43,7 +43,7 @@ import pandas as pd
 from ultralytics import YOLO
 
 
-def _refine_track(dets, max_step, max_gap, gap_speed, min_track=5):
+def _refine_track(dets, max_step, max_gap, gap_speed, min_track=2):
     n = len(dets)
     pts = []
     boxes = []
@@ -57,29 +57,20 @@ def _refine_track(dets, max_step, max_gap, gap_speed, min_track=5):
             boxes.append(None)
 
     def dist(i, j):
-        if pts[i][0] is None or pts[j][0] is None:
+        if i < 0 or j >= n or pts[i][0] is None or pts[j][0] is None:
             return -1.0
         return float(np.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]))
 
-    for i in range(1, n):
+    for i in range(1, n - 1):
         d = dist(i - 1, i)
-        if d > max_step:
-            nxt = dist(i, i + 1) if i + 1 < n else -1.0
-            if nxt > max_step or nxt < 0:
-                pts[i] = (None, None)
-                boxes[i] = None
-            elif dist(i - 2, i - 1) < 0 if i >= 2 else True:
-                pts[i - 1] = (None, None)
-                boxes[i - 1] = None
-
-    for i in range(2, n):
-        if pts[i][0] is None or pts[i - 1][0] is None or pts[i - 2][0] is None:
-            continue
-        ax = pts[i][0] - 2 * pts[i - 1][0] + pts[i - 2][0]
-        ay = pts[i][1] - 2 * pts[i - 1][1] + pts[i - 2][1]
-        if float(np.hypot(ax, ay)) > max_step:
+        nxt = dist(i, i + 1)
+        prv = dist(i - 2, i - 1) if i >= 2 else 0.0
+        if d > max_step and nxt > max_step:
             pts[i] = (None, None)
             boxes[i] = None
+        elif d > max_step and prv < 0:
+            pts[i - 1] = (None, None)
+            boxes[i - 1] = None
 
     missing = [0 if p[0] is not None else 1 for p in pts]
     groups = []
@@ -95,18 +86,19 @@ def _refine_track(dets, max_step, max_gap, gap_speed, min_track=5):
     start = 0
     for gi, (k, a, b) in enumerate(groups):
         if k == 1 and gi > 0 and gi < len(groups) - 1:
-            left = a - 1
-            right = b
             gap = b - a
-            d = dist(left, right)
-            if gap >= max_gap or (d > 0 and d / gap > gap_speed):
-                if a - start > min_track:
+            d = dist(a - 1, b)
+            if gap >= max_gap or (d > 0 and d / max(gap, 1) > gap_speed):
+                if a - start >= min_track:
                     ranges.append((start, a))
-                start = b - 1 if b > a else b
-    if n - start > min_track:
+                start = b
+    if n - start >= min_track:
         ranges.append((start, n))
+    if not ranges:
+        ranges = [(0, n)]
 
     out = [{} for _ in range(n)]
+    covered = set()
     for a, b in ranges:
         xs = np.array([np.nan if pts[i][0] is None else pts[i][0] for i in range(a, b)])
         ys = np.array([np.nan if pts[i][1] is None else pts[i][1] for i in range(a, b)])
@@ -116,18 +108,23 @@ def _refine_track(dets, max_step, max_gap, gap_speed, min_track=5):
             for i in range(a, b):
                 if boxes[i] is not None:
                     out[i] = {1: boxes[i]}
+                    covered.add(i)
             continue
         xs[~good] = np.interp(idx[~good], idx[good], xs[good])
         ys[~good] = np.interp(idx[~good], idx[good], ys[good])
         r = 8.0
         for i in range(a, b):
             if boxes[i] is not None:
-                r = (boxes[i][2] - boxes[i][0]) / 2.0
+                r = max(6.0, (boxes[i][2] - boxes[i][0]) / 2.0)
                 break
         for i in range(a, b):
             cx, cy = float(xs[i - a]), float(ys[i - a])
             conf = boxes[i][4] if boxes[i] is not None and len(boxes[i]) > 4 else 0.5
             out[i] = {1: [cx - r, cy - r, cx + r, cy + r, float(conf)]}
+            covered.add(i)
+    for i in range(n):
+        if i not in covered and boxes[i] is not None:
+            out[i] = {1: boxes[i]}
     return out
 
 
@@ -262,10 +259,10 @@ class BallTracker:
         空档太大或空档两端离太远就拆成两段，只在段内线性补点。
         """
         diag = float(getattr(self, "diag", 0) or 0)
-        max_step = 0.07 * diag if diag > 1 else 120.0
-        gap_speed = 0.05 * diag if diag > 1 else 80.0
+        max_step = 0.18 * diag if diag > 1 else 280.0
+        gap_speed = 0.14 * diag if diag > 1 else 220.0
         return _refine_track(
-            ball_positions, max_step=max_step, max_gap=4, gap_speed=gap_speed
+            ball_positions, max_step=max_step, max_gap=12, gap_speed=gap_speed, min_track=2
         )
 
     def get_ball_shot_frames(

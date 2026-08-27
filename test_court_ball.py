@@ -165,9 +165,10 @@ def main():
         payload["video"] = args.video
         payload["backend"] = getattr(ball_tracker, "kind", ball_backend)
         payload["raw_detect_count"] = sum(1 for d in raw if 1 in d)
+        payload["filled_count"] = sum(1 for d in filled if 1 in d)
         with open(os.path.join(args.out, "ball_tracking.json"), "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
-        print("ball raw detections:", payload["raw_detect_count"], "/", len(raw))
+        print("ball raw/filled:", payload["raw_detect_count"], payload["filled_count"], "/", len(raw))
         print("shot_frames:", shot_frames)
     else:
         ball_tracker = None
