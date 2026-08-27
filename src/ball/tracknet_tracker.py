@@ -59,10 +59,11 @@ def detect_tracknet_kind(state: dict) -> str:
     )
 
 
-def _weighted_blob(hm: np.ndarray, min_val: float, hint=None, max_area: int = 250, gate=None):
+def _weighted_blob(hm: np.ndarray, min_val: float, hint=None, max_area: int = 250):
     binary = (hm >= min_val).astype(np.uint8)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    cands = []
+    best = None
+    best_score = -1e18
     for i in range(1, n):
         area = int(stats[i, cv2.CC_STAT_AREA])
         if area < 2 or area > max_area:
@@ -70,23 +71,17 @@ def _weighted_blob(hm: np.ndarray, min_val: float, hint=None, max_area: int = 25
         ys, xs = np.where(labels == i)
         vals = hm[ys, xs].astype(np.float64)
         mass = float(vals.sum())
-        if mass < 180:
+        if mass <= 0:
             continue
         cx = float((xs * vals).sum() / mass)
         cy = float((ys * vals).sum() / mass)
-        cands.append((cx, cy, mass))
-    if not cands:
-        return None
-    if hint is not None:
-        g = 70.0 if gate is None else float(gate)
-        near = [c for c in cands if float(np.hypot(c[0] - hint[0], c[1] - hint[1])) <= g]
-        pool = near if near else []
-        if not pool:
-            return None
-    else:
-        pool = cands
-    cx, cy, mass = max(pool, key=lambda c: c[2])
-    return cx, cy, float(min(1.0, mass / 4000.0))
+        score = mass
+        if hint is not None:
+            score = mass / (1.0 + 0.12 * float(np.hypot(cx - hint[0], cy - hint[1])))
+        if score > best_score:
+            best_score = score
+            best = (cx, cy, float(min(1.0, mass / 4000.0)))
+    return best
 
 
 def decode_v1_from_argmax(hm: np.ndarray, orig_w: int, orig_h: int, hint=None):
