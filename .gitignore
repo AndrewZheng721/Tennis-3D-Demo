@@ -9,4 +9,7 @@ env/
 .mypy_cache/
 .DS_Store
 .idea/
-.vscode/
+high_angle_dataset/*.zip
+high_angle_dataset/tennis_high_angle_02.mp4
+high_angle_dataset/tennis_high_angle_03.mp4
+high_angle_dataset/tennis_high_angle_04.mp4
