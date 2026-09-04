@@ -9,6 +9,7 @@ import numpy as np
 from tqdm import tqdm
 
 from src.ball.tracknet_tracker import TrackNetBallTracker, default_ball_weights
+from src.court.court_line_detector import CourtLineDetector
 
 
 def _find_high_angle_dir():
@@ -111,6 +112,7 @@ def parse_args():
     p.add_argument("--videos", default=None)
     p.add_argument("--out", default="dataset/tracknet_auto")
     p.add_argument("--weights", default=None)
+    p.add_argument("--heatmap-weights", default="weights/court_heatmap.pth")
     p.add_argument("--max-frames", type=int, default=15000)
     p.add_argument("--keep-test", action="store_true")
     p.add_argument("--val-ratio", type=float, default=0.15)
@@ -131,7 +133,10 @@ def main():
         videos = [v for v in videos if "high_angle_01" not in os.path.basename(v)]
     if not videos:
         raise FileNotFoundError(video_dir)
+    if not os.path.isfile(args.heatmap_weights):
+        raise FileNotFoundError(args.heatmap_weights)
     os.makedirs(os.path.join(args.out, "images"), exist_ok=True)
+    court = CourtLineDetector(heatmap_path=args.heatmap_weights)
     tracker = TrackNetBallTracker(weights)
     all_rows = []
     for vp in videos:
@@ -145,21 +150,40 @@ def main():
             total = min(total, args.max_frames)
         tracker.reset()
         raw = []
+        court_ok = []
+        prev_gray = None
+        prev_det = None
         with tqdm(total=total, desc=stem) as bar:
             n = 0
             while n < total:
                 ok, frame = cap.read()
                 if not ok:
                     break
-                raw.append(tracker.detect_frame(frame))
+                try:
+                    gray, det = court.track_frame(frame, n, prev_gray, prev_det)
+                    use = bool(det.quality_ok)
+                except RuntimeError:
+                    gray, det, use = None, None, False
+                if use:
+                    prev_gray, prev_det = gray, det
+                    tracker.set_court(det.keypoints_xy)
+                    raw.append(tracker.detect_frame(frame))
+                else:
+                    prev_gray, prev_det = None, None
+                    tracker.reset()
+                    raw.append({})
+                court_ok.append(use)
                 n += 1
                 bar.update(1)
         cap.release()
         filled = tracker.interpolate_ball_positions(raw)
+        for i, use in enumerate(court_ok):
+            if not use:
+                filled[i] = {}
         rows = _write_video_labels(
             vp, filled, os.path.join(args.out, "images"), stem, w, h, 640, 360
         )
-        print("  samples", len(rows))
+        print("  court_ok", sum(court_ok), "/", len(court_ok), "samples", len(rows))
         all_rows.extend(rows)
     random.Random(args.seed).shuffle(all_rows)
     n_val = max(1, int(len(all_rows) * args.val_ratio))
