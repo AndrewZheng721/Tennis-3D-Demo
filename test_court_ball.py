@@ -31,6 +31,7 @@ from src.court.court_line_detector import (
     choose_sample_ids,
     read_frame_at,
 )
+from src.score.pipeline import analyze_score
 
 
 def parse_args():
@@ -69,6 +70,8 @@ def parse_args():
     )
     parser.add_argument("--skip-ball", action="store_true", help="只测球场")
     parser.add_argument("--skip-court", action="store_true", help="只测球")
+    parser.add_argument("--skip-score", action="store_true")
+    parser.add_argument("--bounce-weights", default=None)
     return parser.parse_args()
 
 
@@ -152,12 +155,22 @@ def main():
             ball_tracker.set_court(detection.keypoints_xy)
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         raw = []
+        court_dets = []
+        prev_gray = None
+        live = detection
         with tqdm(total=total, desc="detect ball") as pbar:
             n = 0
             while n < total:
                 ok, frame = cap.read()
                 if not ok:
                     break
+                if court_detector is not None:
+                    prev_gray, live = court_detector.track_frame(
+                        frame, n, prev_gray, live, redetect_every=args.court_redetect
+                    )
+                    court_dets.append(live)
+                    if live is not None and hasattr(ball_tracker, "set_court"):
+                        ball_tracker.set_court(live.keypoints_xy)
                 raw.append(ball_tracker.detect_frame(frame))
                 n += 1
                 pbar.update(1)
@@ -172,8 +185,15 @@ def main():
             json.dump(payload, f, ensure_ascii=False, indent=2)
         print("ball raw/filled:", payload["raw_detect_count"], payload["filled_count"], "/", len(raw))
         print("shot_frames:", shot_frames)
+        score = None
+        if not args.skip_score:
+            score = analyze_score(filled, court_dets, fps, args.bounce_weights)
+            with open(os.path.join(args.out, "score.json"), "w", encoding="utf-8") as f:
+                json.dump(score, f, ensure_ascii=False, indent=2)
+            print("bounces:", score["num_bounces"], "points:", len(score["points"]))
     else:
         ball_tracker = None
+        score = None
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     overlay_path = os.path.join(args.out, "overlay.mp4")
@@ -185,6 +205,13 @@ def main():
     )
     trail = []
     shot_set = set(shot_frames)
+    bounce_map = {}
+    event_map = {}
+    last_event = None
+    if score:
+        bounce_map = {b["frame_id"]: b for b in score["bounces"]}
+        for e in score["events"]:
+            event_map.setdefault(e["frame_id"], []).append(e)
     first_saved = False
     frame_id = 0
     prev_gray = None
@@ -217,6 +244,31 @@ def main():
                 vis = ball_tracker.draw_frame(
                     vis, box, trail, frame_id, is_shot=frame_id in shot_set
                 )
+                if frame_id in bounce_map:
+                    b = bounce_map[frame_id]
+                    last_event = f"BOUNCE {b['call'].upper()} {b['side']}"
+                    if b.get("image_xy"):
+                        px, py = int(b["image_xy"][0]), int(b["image_xy"][1])
+                        color = (0, 255, 0) if b["call"] == "in" else (0, 0, 255)
+                        cv2.circle(vis, (px, py), 10, color, 2)
+                if frame_id in event_map:
+                    for e in event_map[frame_id]:
+                        if e["type"] == "point":
+                            last_event = f"POINT {e['reason'].upper()} {e.get('error_side') or ''}"
+                        elif e["type"] == "fault":
+                            last_event = "FAULT"
+                        elif e["type"] == "serve_in":
+                            last_event = f"SERVE IN {e.get('service') or ''}"
+                if last_event:
+                    cv2.putText(
+                        vis,
+                        last_event,
+                        (20, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        (0, 255, 255),
+                        2,
+                    )
             else:
                 cv2.putText(
                     vis,

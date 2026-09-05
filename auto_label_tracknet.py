@@ -3,6 +3,7 @@ import csv
 import glob
 import os
 import random
+import shutil
 
 import cv2
 import numpy as np
@@ -115,9 +116,26 @@ def parse_args():
     p.add_argument("--heatmap-weights", default="weights/court_heatmap.pth")
     p.add_argument("--max-frames", type=int, default=15000)
     p.add_argument("--keep-test", action="store_true")
+    p.add_argument("--only", default=None, help="只处理文件名包含该字符串的视频，例如 tennis_high_angle_02")
     p.add_argument("--val-ratio", type=float, default=0.15)
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
+
+
+def _load_existing_rows(out_dir, drop_stems):
+    rows = []
+    fields = ["path1", "path2", "path3", "x", "y", "vis"]
+    for name in ("labels_train.csv", "labels_val.csv"):
+        path = os.path.join(out_dir, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                blob = row.get("path1", "") + row.get("path2", "") + row.get("path3", "")
+                if any(stem in blob for stem in drop_stems):
+                    continue
+                rows.append({k: row[k] for k in fields})
+    return rows
 
 
 def main():
@@ -131,6 +149,8 @@ def main():
     videos = sorted(glob.glob(os.path.join(video_dir, "*.mp4")))
     if not args.keep_test:
         videos = [v for v in videos if "high_angle_01" not in os.path.basename(v)]
+    if args.only:
+        videos = [v for v in videos if args.only in os.path.basename(v)]
     if not videos:
         raise FileNotFoundError(video_dir)
     if not os.path.isfile(args.heatmap_weights):
@@ -138,9 +158,13 @@ def main():
     os.makedirs(os.path.join(args.out, "images"), exist_ok=True)
     court = CourtLineDetector(heatmap_path=args.heatmap_weights)
     tracker = TrackNetBallTracker(weights)
-    all_rows = []
+    drop_stems = [os.path.splitext(os.path.basename(v))[0] for v in videos]
+    all_rows = _load_existing_rows(args.out, drop_stems)
     for vp in videos:
         stem = os.path.splitext(os.path.basename(vp))[0]
+        img_dir = os.path.join(args.out, "images", stem)
+        if os.path.isdir(img_dir):
+            shutil.rmtree(img_dir)
         print("label", vp)
         cap = cv2.VideoCapture(vp)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
