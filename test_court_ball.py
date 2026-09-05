@@ -208,6 +208,7 @@ def main():
     bounce_map = {}
     event_map = {}
     last_event = None
+    last_event_fid = -999
     if score:
         bounce_map = {b["frame_id"]: b for b in score["bounces"]}
         for e in score["events"]:
@@ -247,6 +248,7 @@ def main():
                 if frame_id in bounce_map:
                     b = bounce_map[frame_id]
                     last_event = f"BOUNCE {b['call'].upper()} {b['side']}"
+                    last_event_fid = frame_id
                     if b.get("image_xy"):
                         px, py = int(b["image_xy"][0]), int(b["image_xy"][1])
                         color = (0, 255, 0) if b["call"] == "in" else (0, 0, 255)
@@ -255,11 +257,14 @@ def main():
                     for e in event_map[frame_id]:
                         if e["type"] == "point":
                             last_event = f"POINT {e['reason'].upper()} {e.get('error_side') or ''}"
+                            last_event_fid = frame_id
                         elif e["type"] == "fault":
                             last_event = "FAULT"
+                            last_event_fid = frame_id
                         elif e["type"] == "serve_in":
                             last_event = f"SERVE IN {e.get('service') or ''}"
-                if last_event:
+                            last_event_fid = frame_id
+                if last_event and frame_id - last_event_fid <= 20:
                     cv2.putText(
                         vis,
                         last_event,
