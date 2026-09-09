@@ -33,7 +33,7 @@ from src.court.court_line_detector import (
 )
 from src.score.pipeline import analyze_score
 from src.score.traj3d import reconstruct_ball_3d
-from src.score.viz3d import draw_court3d
+from src.score.viz3d import write_traj3d_video
 
 
 def parse_args():
@@ -206,16 +206,14 @@ def main():
         traj3d = None
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    out_w = width * 2 if traj3d is not None else width
     overlay_path = os.path.join(args.out, "overlay.mp4")
     writer = cv2.VideoWriter(
         overlay_path,
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
-        (out_w, height),
+        (width, height),
     )
     trail = []
-    trail3d = []
     shot_set = set(shot_frames)
     bounce_map = {}
     event_map = {}
@@ -291,18 +289,6 @@ def main():
                     (0, 255, 0),
                     2,
                 )
-            if traj3d is not None:
-                rec = traj3d["frames"][frame_id] if frame_id < len(traj3d["frames"]) else None
-                xyz = rec["xyz"] if rec else None
-                xyz_t = tuple(xyz) if xyz else None
-                if xyz_t:
-                    trail3d.append(xyz_t)
-                else:
-                    trail3d.append(None)
-                trail3d = trail3d[-48:]
-                vis = cv2.hconcat(
-                    [vis, draw_court3d(width, height, xyz_t, trail3d)]
-                )
             if not first_saved:
                 cv2.imwrite(os.path.join(args.out, "overlay_first.jpg"), vis)
                 first_saved = True
@@ -314,6 +300,11 @@ def main():
     writer.release()
     print("overlay:", overlay_path)
     print("preview:", os.path.join(args.out, "overlay_first.jpg"))
+    if traj3d is not None:
+        p3 = os.path.join(args.out, "overlay_3d.mp4")
+        prev3 = os.path.join(args.out, "overlay_3d_first.jpg")
+        write_traj3d_video(traj3d, p3, prev3)
+        print("overlay_3d:", p3)
 
 
 if __name__ == "__main__":

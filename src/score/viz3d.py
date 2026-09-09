@@ -1,74 +1,92 @@
-from typing import List, Optional
+from typing import Optional
 
 import cv2
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
+from tqdm import tqdm
 
 from .court3d import COURT_LINES_3D, COURT_XYZ, DB, NET
 
 
-def _to_px(X, Y, Z, w, h):
-    px = w * 0.5 + X * (w / 14.5)
-    py = h * 0.84 - (Y + NET) * (h / 30.5) - Z * (h / 9.5)
-    return int(round(px)), int(round(py))
-
-
-def _polyline(img, pts, color, thickness=2):
-    if len(pts) < 2:
-        return
-    cv2.polylines(img, [np.array(pts, dtype=np.int32)], False, color, thickness, cv2.LINE_AA)
-
-
-def draw_court3d(w: int, h: int, xyz, trail: List[Optional[tuple]], bounce_set=None):
-    vis = np.full((h, w, 3), 28, dtype=np.uint8)
-
-    def p(i, z=0.0):
-        return _to_px(COURT_XYZ[i, 0], COURT_XYZ[i, 1], z, w, h)
-
-    fill = np.array(
-        [p(0), p(1), p(3), p(2)], dtype=np.int32
-    )
-    cv2.fillConvexPoly(vis, fill, (62, 92, 36))
-    inner = np.array([p(4), p(6), p(7), p(5)], dtype=np.int32)
-    cv2.fillConvexPoly(vis, inner, (168, 92, 42))
+def _court(ax):
     for a, b in COURT_LINES_3D:
-        cv2.line(vis, p(a), p(b), (230, 230, 230), 1, cv2.LINE_AA)
-    net = [p(0, 0), _to_px(-DB, 0, 1.07, w, h), _to_px(DB, 0, 1.07, w, h), p(1, 0)]
-    _polyline(vis, net, (200, 200, 200), 2)
-    cv2.line(vis, _to_px(-DB, 0, 0, w, h), _to_px(DB, 0, 0, w, h), (180, 180, 180), 1)
+        p, q = COURT_XYZ[a], COURT_XYZ[b]
+        ax.plot([p[0], q[0]], [p[1], q[1]], [0, 0], color="0.35", lw=1.0)
+    ax.plot([-DB, DB], [0, 0], [0, 0], color="0.5", lw=0.8)
+    ax.plot([-DB, -DB], [0, 0], [0, 1.07], color="0.45", lw=1.0)
+    ax.plot([DB, DB], [0, 0], [0, 1.07], color="0.45", lw=1.0)
+    ax.plot([-DB, DB], [0, 0], [1.07, 1.07], color="0.45", lw=1.0)
 
-    shadow = []
-    air = []
-    for q in trail:
-        if q is None:
-            if len(shadow) >= 2:
-                _polyline(vis, shadow, (40, 40, 40), 1)
-            if len(air) >= 2:
-                _polyline(vis, air, (0, 220, 255), 2)
-            shadow, air = [], []
-            continue
-        shadow.append(_to_px(q[0], q[1], 0.0, w, h))
-        air.append(_to_px(q[0], q[1], q[2], w, h))
-    if len(shadow) >= 2:
-        _polyline(vis, shadow, (40, 40, 40), 1)
-    if len(air) >= 2:
-        _polyline(vis, air, (0, 220, 255), 2)
 
-    if xyz is not None:
-        sx, sy = _to_px(xyz[0], xyz[1], 0.0, w, h)
-        bx, by = _to_px(xyz[0], xyz[1], xyz[2], w, h)
-        cv2.line(vis, (sx, sy), (bx, by), (90, 90, 90), 1, cv2.LINE_AA)
-        cv2.circle(vis, (sx, sy), 4, (70, 70, 70), -1)
-        cv2.circle(vis, (bx, by), 6, (0, 255, 255), -1)
-        cv2.putText(
-            vis,
-            f"X {xyz[0]:.2f}  Y {xyz[1]:.2f}  Z {xyz[2]:.2f} m",
-            (24, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 255),
-            2,
-        )
-    else:
-        cv2.putText(vis, "no 3D", (24, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-    cv2.putText(vis, "3D court (m)", (24, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1)
-    return vis
+def _axes(ax):
+    ax.quiver(0, 0, 0, 3.2, 0, 0, color="#c0392b", arrow_length_ratio=0.12, lw=2.0)
+    ax.quiver(0, 0, 0, 0, 3.2, 0, color="#1e8449", arrow_length_ratio=0.12, lw=2.0)
+    ax.quiver(0, 0, 0, 0, 0, 3.2, color="#2471a3", arrow_length_ratio=0.12, lw=2.0)
+    ax.text(3.5, 0, 0, "X", color="#c0392b", fontsize=11)
+    ax.text(0, 3.5, 0, "Y  far", color="#1e8449", fontsize=11)
+    ax.text(0, 0, 3.5, "Z", color="#2471a3", fontsize=11)
+
+
+def _setup(ax):
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.set_xlim(-7, 7)
+    ax.set_ylim(-13, 13)
+    ax.set_zlim(0, 6)
+    try:
+        ax.set_box_aspect((14, 26, 6))
+    except Exception:
+        pass
+    ax.view_init(elev=22, azim=-72)
+    ax.grid(True, alpha=0.25)
+
+
+def _fig_bgr(fig):
+    fig.canvas.draw()
+    buf = np.asarray(fig.canvas.buffer_rgba())
+    return cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
+
+
+def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None):
+    fps = float(traj3d.get("fps") or 30)
+    recs = traj3d["frames"]
+    fig = plt.figure(figsize=(10.24, 7.68), dpi=100, facecolor="white")
+    ax = fig.add_subplot(111, projection="3d")
+    fig.subplots_adjust(left=0.02, right=0.98, bottom=0.02, top=0.92)
+    h0, w0, _ = _fig_bgr(fig).shape
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w0, h0))
+    trail = []
+    first = True
+    for rec in tqdm(recs, desc="write 3d"):
+        ax.cla()
+        _setup(ax)
+        _court(ax)
+        _axes(ax)
+        xyz = rec.get("xyz")
+        if xyz:
+            trail.append(xyz)
+            xs, ys, zs = zip(*trail[-80:])
+            ax.plot(xs, ys, zs, color="#1abc9c", lw=2.0)
+            ax.scatter([xyz[0]], [xyz[1]], [0.0], c="#7f8c8d", s=18)
+            ax.plot([xyz[0], xyz[0]], [xyz[1], xyz[1]], [0, xyz[2]], color="#95a5a6", lw=0.8)
+            ax.scatter([xyz[0]], [xyz[1]], [xyz[2]], c="#e67e22", s=36)
+            ax.set_title(
+                f"frame {rec['frame_id']}   X={xyz[0]:.2f}  Y={xyz[1]:.2f}  Z={xyz[2]:.2f} m",
+                fontsize=11,
+            )
+        else:
+            trail = []
+            ax.set_title(f"frame {rec['frame_id']}   no 3D", fontsize=11)
+        img = _fig_bgr(fig)
+        if img.shape[1] != w0 or img.shape[0] != h0:
+            img = cv2.resize(img, (w0, h0))
+        if first and preview_path:
+            cv2.imwrite(preview_path, img)
+            first = False
+        writer.write(img)
+    writer.release()
+    plt.close(fig)
