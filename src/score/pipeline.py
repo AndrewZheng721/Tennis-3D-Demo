@@ -1,12 +1,12 @@
 from typing import Optional
 
-from .bounce import detect_bounces
+from .bounce import detect_bounces, _h_near
 from .court3d import classify_xy, estimate_camera, ray_at_z
-from .geom import ball_center
+from .geom import ball_center, classify_bounce, image_to_court, ref_xy_to_xyz
 
 
 def analyze_score(filled, court_dets, fps: float, bounce_weights: Optional[str] = None, image_shape=None):
-    bounce_ids = detect_bounces(filled, bounce_weights)
+    bounce_ids = detect_bounces(filled, bounce_weights, court_dets)
     bounces = []
     cam = None
     last = -999
@@ -23,12 +23,24 @@ def analyze_score(filled, court_dets, fps: float, bounce_weights: Optional[str] 
             got = estimate_camera(det.keypoints_xy, image_shape)
             if got is not None:
                 cam = got
-        xyz = ray_at_z(cam, uv, 0.0)
+        court_xy = image_to_court(uv, _h_near(court_dets, fid))
+        xyz = ref_xy_to_xyz(court_xy) or ray_at_z(cam, uv, 0.0)
         if xyz is None:
             continue
         if abs(xyz[0]) > 8.0 or abs(xyz[1]) > 14.0:
             continue
-        info = classify_xy(xyz[0], xyz[1])
+        if court_xy is not None:
+            c = classify_bounce(court_xy)
+            rally = "out" if not c["in_singles"] else ("far_in" if c["side"] == "far" else "near_in")
+            info = {
+                "side": c["side"],
+                "serve_zone": c["service"],
+                "rally_zone": rally,
+                "in_singles": c["in_singles"],
+                "in_doubles": c["in_doubles"],
+            }
+        else:
+            info = classify_xy(xyz[0], xyz[1], eps=0.12)
         last = fid
         bounces.append(
             {

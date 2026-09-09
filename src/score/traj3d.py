@@ -16,11 +16,11 @@ def _cam_for(det, image_shape, prev):
     return cam if cam is not None else prev
 
 
-def reconstruct_ball_3d(filled, court_dets, fps: float, image_shape, bounce_weights=None):
+def reconstruct_ball_3d(filled, court_dets, fps: float, image_shape, bounce_weights=None, bounce_ids=None):
     n = len(filled)
-    bounce_ids = sorted(
-        i for i in detect_bounces(filled, bounce_weights) if 0 <= i < n
-    )
+    if bounce_ids is None:
+        bounce_ids = detect_bounces(filled, bounce_weights, court_dets)
+    bounce_ids = sorted(i for i in bounce_ids if 0 <= i < n)
     cams = []
     prev = None
     for i in range(n):

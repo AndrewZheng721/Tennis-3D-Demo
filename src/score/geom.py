@@ -25,6 +25,8 @@ REF_KPS = np.array(
 
 NET_Y = float((REF_KPS[12, 1] + REF_KPS[13, 1]) / 2.0)
 NET_X = float(REF_KPS[12, 0])
+ITF_W = 10.97
+ITF_HALF_L = 11.885
 
 SINGLES = REF_KPS[[4, 6, 7, 5]].astype(np.float32)
 DOUBLES = REF_KPS[[0, 1, 3, 2]].astype(np.float32)
@@ -49,6 +51,21 @@ def image_to_court(xy, H_inv) -> Optional[Tuple[float, float]]:
     if not np.isfinite(q).all():
         return None
     return float(q[0]), float(q[1])
+
+
+def ref_xy_to_xyz(court_xy) -> Optional[Tuple[float, float, float]]:
+    if court_xy is None:
+        return None
+    x_ref, y_ref = float(court_xy[0]), float(court_xy[1])
+    dx = float(REF_KPS[1, 0] - REF_KPS[0, 0])
+    dy = float(NET_Y - REF_KPS[0, 1])
+    if abs(dx) < 1e-6 or abs(dy) < 1e-6:
+        return None
+    x_m = (x_ref - NET_X) / dx * ITF_W
+    y_m = (NET_Y - y_ref) / dy * ITF_HALF_L
+    if not np.isfinite([x_m, y_m]).all():
+        return None
+    return float(x_m), float(y_m), 0.0
 
 
 def _inside(xy, poly) -> bool:
