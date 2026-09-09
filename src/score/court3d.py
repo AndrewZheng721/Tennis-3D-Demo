@@ -117,3 +117,33 @@ def ray_at_z(cam: dict, uv, z: float) -> Optional[Tuple[float, float, float]]:
     if abs(P[0]) > 20 or abs(P[1]) > 25 or P[2] < -1 or P[2] > 20:
         return None
     return float(P[0]), float(P[1]), float(P[2])
+
+
+def classify_xy(x: float, y: float, eps: float = 0.05) -> dict:
+    in_singles = abs(x) <= SING + eps and abs(y) <= NET + eps
+    in_doubles = abs(x) <= DB + eps and abs(y) <= NET + eps
+    serve = None
+    if -SING - eps <= x <= 0.0 + eps and 0.0 - eps <= y <= SL + eps:
+        serve = "far_left"
+    elif 0.0 - eps <= x <= SING + eps and 0.0 - eps <= y <= SL + eps:
+        serve = "far_right"
+    elif -SING - eps <= x <= 0.0 + eps and -SL - eps <= y <= 0.0 + eps:
+        serve = "near_left"
+    elif 0.0 - eps <= x <= SING + eps and -SL - eps <= y <= 0.0 + eps:
+        serve = "near_right"
+    if not in_singles:
+        serve = None
+        rally = "out"
+        side = "far" if y >= 0 else "near"
+    else:
+        rally = "far_in" if y >= 0 else "near_in"
+        side = "far" if y >= 0 else "near"
+        if serve and ((serve.startswith("far") and y < 0) or (serve.startswith("near") and y > 0)):
+            serve = None
+    return {
+        "side": side,
+        "serve_zone": serve,
+        "rally_zone": rally,
+        "in_singles": in_singles,
+        "in_doubles": in_doubles,
+    }

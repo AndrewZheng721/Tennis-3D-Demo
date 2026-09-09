@@ -188,10 +188,12 @@ def main():
         print("shot_frames:", shot_frames)
         score = None
         if not args.skip_score:
-            score = analyze_score(filled, court_dets, fps, args.bounce_weights)
+            score = analyze_score(
+                filled, court_dets, fps, args.bounce_weights, (height, width)
+            )
             with open(os.path.join(args.out, "score.json"), "w", encoding="utf-8") as f:
                 json.dump(score, f, ensure_ascii=False, indent=2)
-            print("bounces:", score["num_bounces"], "points:", len(score["points"]))
+            print("bounces:", score["num_bounces"])
         traj3d = None
         if not args.skip_3d:
             traj3d = reconstruct_ball_3d(
@@ -216,12 +218,12 @@ def main():
     trail = []
     shot_set = set(shot_frames)
     bounce_map = {}
-    event_map = {}
+    bounce_list = []
     last_event = None
+    last_event_fid = -999
     if score:
-        bounce_map = {b["frame_id"]: b for b in score["bounces"]}
-        for e in score["events"]:
-            event_map.setdefault(e["frame_id"], []).append(e)
+        bounce_list = score["bounces"]
+        bounce_map = {b["frame_id"]: b for b in bounce_list}
     first_saved = False
     frame_id = 0
     prev_gray = None
@@ -254,28 +256,36 @@ def main():
                 vis = ball_tracker.draw_frame(
                     vis, box, trail, frame_id, is_shot=frame_id in shot_set
                 )
+                for b in bounce_list:
+                    if b["frame_id"] > frame_id or not b.get("image_xy"):
+                        continue
+                    px, py = int(b["image_xy"][0]), int(b["image_xy"][1])
+                    color = (0, 255, 0) if b.get("in_singles") else (0, 0, 255)
+                    thick = 3 if b["frame_id"] == frame_id else 2
+                    cv2.circle(vis, (px, py), 12, color, thick)
+                    cv2.drawMarker(vis, (px, py), color, cv2.MARKER_CROSS, 16, 2)
+                    cv2.putText(
+                        vis,
+                        f"#{b['frame_id']}",
+                        (px + 10, py - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        color,
+                        1,
+                    )
                 if frame_id in bounce_map:
                     b = bounce_map[frame_id]
-                    last_event = f"BOUNCE {b['call'].upper()} {b['side']}"
-                    if b.get("image_xy"):
-                        px, py = int(b["image_xy"][0]), int(b["image_xy"][1])
-                        color = (0, 255, 0) if b["call"] == "in" else (0, 0, 255)
-                        cv2.circle(vis, (px, py), 10, color, 2)
-                if frame_id in event_map:
-                    for e in event_map[frame_id]:
-                        if e["type"] == "point":
-                            last_event = f"POINT {e['reason'].upper()} {e.get('error_side') or ''}"
-                        elif e["type"] == "fault":
-                            last_event = "FAULT"
-                        elif e["type"] == "serve_in":
-                            last_event = f"SERVE IN {e.get('service') or ''}"
-                if last_event:
+                    serve = b.get("serve_zone") or "-"
+                    rally = b.get("rally_zone") or "-"
+                    last_event = f"BOUNCE  SERVE {serve}  RALLY {rally}"
+                    last_event_fid = frame_id
+                if last_event and frame_id - last_event_fid <= 45:
                     cv2.putText(
                         vis,
                         last_event,
                         (20, 150),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.9,
+                        0.85,
                         (0, 255, 255),
                         2,
                     )
@@ -303,7 +313,7 @@ def main():
     if traj3d is not None:
         p3 = os.path.join(args.out, "overlay_3d.mp4")
         prev3 = os.path.join(args.out, "overlay_3d_first.jpg")
-        write_traj3d_video(traj3d, p3, prev3)
+        write_traj3d_video(traj3d, p3, prev3, score["bounces"] if score else None)
         print("overlay_3d:", p3)
 
 

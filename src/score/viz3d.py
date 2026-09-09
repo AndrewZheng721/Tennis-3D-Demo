@@ -51,9 +51,10 @@ def _fig_bgr(fig):
     return cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
 
 
-def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None):
+def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None, bounces=None):
     fps = float(traj3d.get("fps") or 30)
     recs = traj3d["frames"]
+    bounces = bounces or []
     fig = plt.figure(figsize=(10.24, 7.68), dpi=100, facecolor="white")
     ax = fig.add_subplot(111, projection="3d")
     fig.subplots_adjust(left=0.02, right=0.98, bottom=0.02, top=0.92)
@@ -66,6 +67,21 @@ def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None):
         _setup(ax)
         _court(ax)
         _axes(ax)
+        fid = int(rec["frame_id"])
+        done = [b for b in bounces if int(b["frame_id"]) <= fid and b.get("xyz")]
+        if done:
+            ax.scatter(
+                [b["xyz"][0] for b in done],
+                [b["xyz"][1] for b in done],
+                [0.0] * len(done),
+                c=["#27ae60" if b.get("in_singles") else "#c0392b" for b in done],
+                s=55,
+                marker="x",
+                linewidths=2,
+            )
+            last = done[-1]
+            tag = f"SERVE {last.get('serve_zone') or '-'}  RALLY {last.get('rally_zone') or '-'}"
+            ax.text(last["xyz"][0], last["xyz"][1], 0.35, tag, fontsize=8, color="#1a1a1a")
         xyz = rec.get("xyz")
         if xyz:
             trail.append(xyz)
@@ -75,12 +91,12 @@ def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None):
             ax.plot([xyz[0], xyz[0]], [xyz[1], xyz[1]], [0, xyz[2]], color="#95a5a6", lw=0.8)
             ax.scatter([xyz[0]], [xyz[1]], [xyz[2]], c="#e67e22", s=36)
             ax.set_title(
-                f"frame {rec['frame_id']}   X={xyz[0]:.2f}  Y={xyz[1]:.2f}  Z={xyz[2]:.2f} m",
+                f"frame {fid}   X={xyz[0]:.2f}  Y={xyz[1]:.2f}  Z={xyz[2]:.2f} m",
                 fontsize=11,
             )
         else:
             trail = []
-            ax.set_title(f"frame {rec['frame_id']}   no 3D", fontsize=11)
+            ax.set_title(f"frame {fid}   no 3D", fontsize=11)
         img = _fig_bgr(fig)
         if img.shape[1] != w0 or img.shape[0] != h0:
             img = cv2.resize(img, (w0, h0))
