@@ -3,7 +3,7 @@ from typing import List, Optional
 
 def run_rally(bounces: List[dict]) -> List[dict]:
     events = []
-    phase = "rally"
+    phase = "serve"
     last_side = None
     point_id = 0
 

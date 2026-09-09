@@ -32,6 +32,8 @@ from src.court.court_line_detector import (
     read_frame_at,
 )
 from src.score.pipeline import analyze_score
+from src.score.traj3d import reconstruct_ball_3d
+from src.score.viz3d import draw_court3d
 
 
 def parse_args():
@@ -71,6 +73,7 @@ def parse_args():
     parser.add_argument("--skip-ball", action="store_true", help="只测球场")
     parser.add_argument("--skip-court", action="store_true", help="只测球")
     parser.add_argument("--skip-score", action="store_true")
+    parser.add_argument("--skip-3d", action="store_true")
     parser.add_argument("--bounce-weights", default=None)
     return parser.parse_args()
 
@@ -169,8 +172,6 @@ def main():
                         frame, n, prev_gray, live, redetect_every=args.court_redetect
                     )
                     court_dets.append(live)
-                    if live is not None and hasattr(ball_tracker, "set_court"):
-                        ball_tracker.set_court(live.keypoints_xy)
                 raw.append(ball_tracker.detect_frame(frame))
                 n += 1
                 pbar.update(1)
@@ -191,24 +192,34 @@ def main():
             with open(os.path.join(args.out, "score.json"), "w", encoding="utf-8") as f:
                 json.dump(score, f, ensure_ascii=False, indent=2)
             print("bounces:", score["num_bounces"], "points:", len(score["points"]))
+        traj3d = None
+        if not args.skip_3d:
+            traj3d = reconstruct_ball_3d(
+                filled, court_dets, fps, (height, width), args.bounce_weights
+            )
+            with open(os.path.join(args.out, "ball_3d.json"), "w", encoding="utf-8") as f:
+                json.dump(traj3d, f, ensure_ascii=False, indent=2)
+            print("3d frames:", sum(1 for r in traj3d["frames"] if r["xyz"]), "/", len(traj3d["frames"]))
     else:
         ball_tracker = None
         score = None
+        traj3d = None
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    out_w = width * 2 if traj3d is not None else width
     overlay_path = os.path.join(args.out, "overlay.mp4")
     writer = cv2.VideoWriter(
         overlay_path,
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
-        (width, height),
+        (out_w, height),
     )
     trail = []
+    trail3d = []
     shot_set = set(shot_frames)
     bounce_map = {}
     event_map = {}
     last_event = None
-    last_event_fid = -999
     if score:
         bounce_map = {b["frame_id"]: b for b in score["bounces"]}
         for e in score["events"]:
@@ -248,7 +259,6 @@ def main():
                 if frame_id in bounce_map:
                     b = bounce_map[frame_id]
                     last_event = f"BOUNCE {b['call'].upper()} {b['side']}"
-                    last_event_fid = frame_id
                     if b.get("image_xy"):
                         px, py = int(b["image_xy"][0]), int(b["image_xy"][1])
                         color = (0, 255, 0) if b["call"] == "in" else (0, 0, 255)
@@ -257,14 +267,11 @@ def main():
                     for e in event_map[frame_id]:
                         if e["type"] == "point":
                             last_event = f"POINT {e['reason'].upper()} {e.get('error_side') or ''}"
-                            last_event_fid = frame_id
                         elif e["type"] == "fault":
                             last_event = "FAULT"
-                            last_event_fid = frame_id
                         elif e["type"] == "serve_in":
                             last_event = f"SERVE IN {e.get('service') or ''}"
-                            last_event_fid = frame_id
-                if last_event and frame_id - last_event_fid <= 20:
+                if last_event:
                     cv2.putText(
                         vis,
                         last_event,
@@ -283,6 +290,18 @@ def main():
                     1,
                     (0, 255, 0),
                     2,
+                )
+            if traj3d is not None:
+                rec = traj3d["frames"][frame_id] if frame_id < len(traj3d["frames"]) else None
+                xyz = rec["xyz"] if rec else None
+                xyz_t = tuple(xyz) if xyz else None
+                if xyz_t:
+                    trail3d.append(xyz_t)
+                else:
+                    trail3d.append(None)
+                trail3d = trail3d[-48:]
+                vis = cv2.hconcat(
+                    [vis, draw_court3d(width, height, xyz_t, trail3d)]
                 )
             if not first_saved:
                 cv2.imwrite(os.path.join(args.out, "overlay_first.jpg"), vis)
