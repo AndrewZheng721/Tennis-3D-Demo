@@ -119,78 +119,12 @@ def default_bounce_weights() -> Optional[str]:
     return None
 
 
-def _snap_turn(ys, i, w: int = 6) -> int:
-    n = len(ys)
-    best, best_peak = i, -1.0
-    for j in range(max(1, i - w), min(n - 1, i + w + 1)):
-        a, b, c = ys[j - 1], ys[j], ys[j + 1]
-        if a is None or b is None or c is None:
-            continue
-        peak = (b - a) * (b - c)
-        if peak > best_peak:
-            best_peak = peak
-            best = j
-    return best
-
-
-def _dedup(ids, gap: int = 12) -> List[int]:
-    keep = []
-    for i in sorted(set(ids)):
-        if not keep or i - keep[-1] >= gap:
-            keep.append(i)
-        else:
-            keep[-1] = i
-    return keep
-
-
-def _h_near(court_dets, j: int):
-    from .geom import H_inv_of
-
-    if not court_dets:
-        return None
-    for k in range(0, 10):
-        for t in (j, j - k, j + k):
-            if 0 <= t < len(court_dets):
-                h = H_inv_of(court_dets[t])
-                if h is not None:
-                    return h
-    return None
-
-
-def _is_hit(filled, court_dets, i: int, w: int = 5) -> bool:
-    from .geom import ball_center, image_to_court
-
-    n = len(filled)
-    if i - w < 0 or i + w >= n:
-        return False
-    pts = []
-    for j in (i - w, i, i + w):
-        uv = ball_center(filled[j].get(1, []))
-        xy = image_to_court(uv, _h_near(court_dets, j))
-        if xy is None:
-            return False
-        pts.append(xy)
-    v0 = (pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
-    v1 = (pts[2][0] - pts[1][0], pts[2][1] - pts[1][1])
-    n0 = (v0[0] ** 2 + v0[1] ** 2) ** 0.5
-    n1 = (v1[0] ** 2 + v1[1] ** 2) ** 0.5
-    if n0 < 80 or n1 < 80:
-        return False
-    return v0[0] * v1[0] + v0[1] * v1[1] < 0
-
-
-def detect_bounces(filled, model_path: Optional[str] = None, court_dets=None) -> List[int]:
+def detect_bounces(filled, model_path: Optional[str] = None) -> List[int]:
     xs, ys = _centers(filled)
     path = model_path or default_bounce_weights()
-    ids = []
     if path:
         try:
-            ids = _catboost_bounces(xs, ys, path)
+            return _catboost_bounces(xs, ys, path)
         except Exception:
-            ids = []
-    if not ids:
-        ids = _geom_bounces(xs, ys)
-    ids = _dedup([_snap_turn(ys, i) for i in ids])
-    if court_dets is not None:
-        ids = [i for i in ids if not _is_hit(filled, court_dets, i)]
-    return _dedup(ids)
+            pass
+    return _geom_bounces(xs, ys)

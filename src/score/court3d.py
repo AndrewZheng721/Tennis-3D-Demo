@@ -119,7 +119,7 @@ def ray_at_z(cam: dict, uv, z: float) -> Optional[Tuple[float, float, float]]:
     return float(P[0]), float(P[1]), float(P[2])
 
 
-def classify_xy(x: float, y: float, eps: float = 0.12) -> dict:
+def classify_xy(x: float, y: float, eps: float = 0.05) -> dict:
     in_singles = abs(x) <= SING + eps and abs(y) <= NET + eps
     in_doubles = abs(x) <= DB + eps and abs(y) <= NET + eps
     serve = None

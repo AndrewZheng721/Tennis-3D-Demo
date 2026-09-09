@@ -197,12 +197,7 @@ def main():
         traj3d = None
         if not args.skip_3d:
             traj3d = reconstruct_ball_3d(
-                filled,
-                court_dets,
-                fps,
-                (height, width),
-                args.bounce_weights,
-                bounce_ids=[b["frame_id"] for b in score["bounces"]] if score else None,
+                filled, court_dets, fps, (height, width), args.bounce_weights
             )
             with open(os.path.join(args.out, "ball_3d.json"), "w", encoding="utf-8") as f:
                 json.dump(traj3d, f, ensure_ascii=False, indent=2)
