@@ -189,7 +189,7 @@ def main():
                     court_dets.append(live)
                 raw.append(ball_tracker.detect_frame(frame))
                 if player_tracker is not None:
-                    pose_raw.append(player_tracker.detect(frame))
+                    pose_raw.append(player_tracker.detect(frame, live))
                 n += 1
                 pbar.update(1)
         filled = ball_tracker.interpolate_ball_positions(raw)

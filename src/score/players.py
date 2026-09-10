@@ -5,6 +5,7 @@ import numpy as np
 from ultralytics import YOLO
 
 from .court3d import estimate_camera, ray_at_z
+from .geom import H_inv_of, NET_X, NET_Y, REF_KPS, image_to_court
 
 ANKLE_L, ANKLE_R = 15, 16
 
@@ -18,21 +19,6 @@ def default_pose_weights() -> Optional[str]:
         if os.path.isfile(p):
             return os.path.abspath(p)
     return None
-
-
-def _cy(p):
-    b = p["bbox"]
-    return 0.5 * (b[1] + b[3])
-
-
-def _cx(p):
-    b = p["bbox"]
-    return 0.5 * (b[0] + b[2])
-
-
-def _area(p):
-    b = p["bbox"]
-    return max(0.0, (b[2] - b[0]) * (b[3] - b[1]))
 
 
 def _iou(a, b) -> float:
@@ -56,30 +42,55 @@ def _nms(players, thr: float = 0.45) -> List[dict]:
     return keep
 
 
-def _shift(p, dy: float):
-    q = dict(p)
-    q["bbox"] = [p["bbox"][0], p["bbox"][1] + dy, p["bbox"][2], p["bbox"][3] + dy]
-    q["keypoints"] = [[xy[0], xy[1] + dy] for xy in p.get("keypoints") or []]
-    return q
+def _in_play(court_xy) -> bool:
+    x, y = court_xy
+    x0 = float(REF_KPS[0, 0]) - 90
+    x1 = float(REF_KPS[1, 0]) + 90
+    y0 = float(REF_KPS[0, 1]) - 280
+    y1 = float(REF_KPS[2, 1]) + 280
+    return x0 <= x <= x1 and y0 <= y <= y1
 
 
-def _pick_near_far(players, w: int, h: int) -> List[dict]:
+def _select_players(players, det, w: int, h: int) -> List[dict]:
     if not players:
         return []
-    far_c = [p for p in players if _cy(p) < h * 0.52]
-    near_c = [p for p in players if _cy(p) >= h * 0.48]
+    H = H_inv_of(det)
+    kps = None
+    if det is not None and getattr(det, "keypoints_xy", None) is not None:
+        kps = np.asarray(det.keypoints_xy, dtype=np.float64).reshape(-1, 2)
+    net_y_img = None
+    if kps is not None and len(kps) >= 14:
+        net_y_img = 0.5 * (float(kps[12, 1]) + float(kps[13, 1]))
+    buckets = {"far": [], "near": []}
+    for p in players:
+        uv = foot_uv(p.get("keypoints") or [], p.get("bbox"))
+        if uv is None:
+            continue
+        court_xy = image_to_court(uv, H) if H is not None else None
+        if court_xy is not None:
+            if not _in_play(court_xy):
+                continue
+            side = "far" if court_xy[1] < NET_Y else "near"
+            dist = abs(court_xy[0] - NET_X)
+        elif net_y_img is not None and kps is not None:
+            side = "far" if uv[1] < net_y_img else "near"
+            idx = (0, 1, 4, 6, 8, 9, 12) if side == "far" else (2, 3, 5, 7, 10, 11, 13)
+            dist = min(
+                ((uv[0] - kps[i, 0]) ** 2 + (uv[1] - kps[i, 1]) ** 2) ** 0.5 for i in idx
+            )
+        else:
+            continue
+        q = dict(p)
+        q["_dist"] = dist
+        buckets[side].append(q)
     out = []
-    if far_c:
-        p = min(far_c, key=lambda x: abs(_cx(x) - w * 0.5))
-        p = dict(p)
-        p["track_id"] = 1
+    for side, tid in (("far", 1), ("near", 2)):
+        if not buckets[side]:
+            continue
+        p = min(buckets[side], key=lambda x: x["_dist"])
+        p["track_id"] = tid
+        p.pop("_dist", None)
         out.append(p)
-    if near_c:
-        p = max(near_c, key=_area)
-        p = dict(p)
-        p["track_id"] = 2
-        if not out or abs(_cy(p) - _cy(out[0])) > 20:
-            out.append(p)
     return out
 
 
@@ -102,12 +113,16 @@ class PlayerTracker:
         self.model = YOLO(weights)
         self.conf = conf
         self.imgsz = imgsz
+        self.prev = {"far": None, "near": None}
+        self.miss = {"far": 0, "near": 0}
 
     def reset(self):
         try:
             self.model.predictor = None
         except Exception:
             pass
+        self.prev = {"far": None, "near": None}
+        self.miss = {"far": 0, "near": 0}
 
     def _run(self, image) -> List[dict]:
         result = self.model.predict(
@@ -134,13 +149,25 @@ class PlayerTracker:
             )
         return out
 
-    def detect(self, frame) -> List[dict]:
+    def detect(self, frame, court_det=None) -> List[dict]:
         h, w = frame.shape[:2]
         raw = self._run(frame)
         y1 = int(h * 0.48)
-        for p in self._run(frame[:y1, :]):
-            raw.append(_shift(p, 0.0))
-        return _pick_near_far(_nms(raw), w, h)
+        raw.extend(self._run(frame[:y1, :]))
+        picked = _select_players(_nms(raw), court_det, w, h)
+        by_id = {p["track_id"]: p for p in picked}
+        out = []
+        for side, tid in (("far", 1), ("near", 2)):
+            if tid in by_id:
+                self.prev[side] = by_id[tid]
+                self.miss[side] = 0
+                out.append(by_id[tid])
+            elif self.prev[side] is not None and self.miss[side] < 18:
+                self.miss[side] += 1
+                out.append(self.prev[side])
+            else:
+                self.miss[side] += 1
+        return out
 
 
 def lift_players(players, det, image_shape, cam=None):
