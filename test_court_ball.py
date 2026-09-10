@@ -142,7 +142,7 @@ def main():
         pose_weights = args.pose_weights or default_pose_weights()
         if pose_weights:
             print("pose:", pose_weights)
-            player_tracker = PlayerTracker(pose_weights, conf=0.12, imgsz=max(1280, args.imgsz))
+            player_tracker = PlayerTracker(pose_weights, conf=0.05, imgsz=max(1280, args.imgsz))
             player_tracker.reset()
         else:
             print("pose: missing yolo26m-pose.pt, skip")
