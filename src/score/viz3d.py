@@ -51,10 +51,11 @@ def _fig_bgr(fig):
     return cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
 
 
-def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None, bounces=None):
+def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None, bounces=None, players=None):
     fps = float(traj3d.get("fps") or 30)
     recs = traj3d["frames"]
     bounces = bounces or []
+    players = players or []
     fig = plt.figure(figsize=(10.24, 7.68), dpi=100, facecolor="white")
     ax = fig.add_subplot(111, projection="3d")
     fig.subplots_adjust(left=0.02, right=0.98, bottom=0.02, top=0.92)
@@ -82,6 +83,14 @@ def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None, bo
             last = done[-1]
             tag = f"SERVE {last.get('serve_zone') or '-'}  RALLY {last.get('rally_zone') or '-'}"
             ax.text(last["xyz"][0], last["xyz"][1], 0.35, tag, fontsize=8, color="#1a1a1a")
+        if fid < len(players):
+            for p in players[fid]:
+                pxyz = p.get("xyz")
+                if not pxyz:
+                    continue
+                col = "#2980b9" if p.get("side") == "near" else "#8e44ad"
+                ax.scatter([pxyz[0]], [pxyz[1]], [0.0], c=col, s=40, marker="o")
+                ax.text(pxyz[0], pxyz[1], 0.25, p.get("side") or "P", fontsize=7, color=col)
         xyz = rec.get("xyz")
         if xyz:
             trail.append(xyz)
