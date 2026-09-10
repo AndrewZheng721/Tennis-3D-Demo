@@ -93,3 +93,26 @@ def lift_players(players, det, image_shape, cam=None):
         q["side"] = side
         out.append(q)
     return out, cam
+
+
+def draw_players(img, players):
+    import cv2
+
+    for p in players:
+        box = p.get("bbox") or []
+        if len(box) < 4:
+            continue
+        x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        side = p.get("side") or ""
+        color = (0, 165, 255) if side == "near" else (255, 0, 180)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            img,
+            f"{side or 'P'} #{p.get('track_id', 0)}",
+            (x1, max(18, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2,
+        )
+    return img

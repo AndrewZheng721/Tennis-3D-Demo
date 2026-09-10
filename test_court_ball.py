@@ -32,6 +32,7 @@ from src.court.court_line_detector import (
     read_frame_at,
 )
 from src.score.pipeline import analyze_score
+from src.score.players import PlayerTracker, default_pose_weights, draw_players, lift_players
 from src.score.traj3d import reconstruct_ball_3d
 from src.score.viz3d import write_traj3d_video
 
@@ -74,6 +75,8 @@ def parse_args():
     parser.add_argument("--skip-court", action="store_true", help="只测球")
     parser.add_argument("--skip-score", action="store_true")
     parser.add_argument("--skip-3d", action="store_true")
+    parser.add_argument("--skip-pose", action="store_true")
+    parser.add_argument("--pose-weights", default=None)
     parser.add_argument("--bounce-weights", default=None)
     return parser.parse_args()
 
@@ -132,6 +135,17 @@ def main():
 
     filled = None
     shot_frames = []
+    court_dets = []
+    pose_lifted = []
+    player_tracker = None
+    if not args.skip_pose:
+        pose_weights = args.pose_weights or default_pose_weights()
+        if pose_weights:
+            print("pose:", pose_weights)
+            player_tracker = PlayerTracker(pose_weights)
+            player_tracker.reset()
+        else:
+            print("pose: missing yolo26m-pose.pt, skip")
     if not args.skip_ball:
         ball_weights = args.ball_weights
         ball_backend = args.ball_backend
@@ -159,6 +173,7 @@ def main():
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         raw = []
         court_dets = []
+        pose_raw = []
         prev_gray = None
         live = detection
         with tqdm(total=total, desc="detect ball") as pbar:
@@ -173,6 +188,8 @@ def main():
                     )
                     court_dets.append(live)
                 raw.append(ball_tracker.detect_frame(frame))
+                if player_tracker is not None:
+                    pose_raw.append(player_tracker.detect(frame))
                 n += 1
                 pbar.update(1)
         filled = ball_tracker.interpolate_ball_positions(raw)
@@ -202,6 +219,19 @@ def main():
             with open(os.path.join(args.out, "ball_3d.json"), "w", encoding="utf-8") as f:
                 json.dump(traj3d, f, ensure_ascii=False, indent=2)
             print("3d frames:", sum(1 for r in traj3d["frames"] if r["xyz"]), "/", len(traj3d["frames"]))
+        if player_tracker is not None:
+            cam = None
+            for i, pl in enumerate(pose_raw):
+                det = court_dets[i] if i < len(court_dets) else None
+                lifted, cam = lift_players(pl, det, (height, width), cam)
+                pose_lifted.append(lifted)
+            with open(os.path.join(args.out, "players.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {"fps": float(fps), "frames": [{"frame_id": i, "players": p} for i, p in enumerate(pose_lifted)]},
+                    f,
+                    ensure_ascii=False,
+                )
+            print("pose frames:", sum(1 for p in pose_lifted if p), "/", len(pose_lifted))
     else:
         ball_tracker = None
         score = None
@@ -243,6 +273,8 @@ def main():
                     redetect_every=args.court_redetect,
                 )
                 vis = court_detector.draw(vis, live)
+            if frame_id < len(pose_lifted):
+                vis = draw_players(vis, pose_lifted[frame_id])
             box = None
             if filled is not None and frame_id < len(filled):
                 box = filled[frame_id].get(1)
@@ -313,7 +345,9 @@ def main():
     if traj3d is not None:
         p3 = os.path.join(args.out, "overlay_3d.mp4")
         prev3 = os.path.join(args.out, "overlay_3d_first.jpg")
-        write_traj3d_video(traj3d, p3, prev3, score["bounces"] if score else None)
+        write_traj3d_video(
+            traj3d, p3, prev3, score["bounces"] if score else None, pose_lifted
+        )
         print("overlay_3d:", p3)
 
 
