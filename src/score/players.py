@@ -20,6 +20,41 @@ def default_pose_weights() -> Optional[str]:
     return None
 
 
+def _cy(p):
+    b = p["bbox"]
+    return 0.5 * (b[1] + b[3])
+
+
+def _cx(p):
+    b = p["bbox"]
+    return 0.5 * (b[0] + b[2])
+
+
+def _area(p):
+    b = p["bbox"]
+    return max(0.0, (b[2] - b[0]) * (b[3] - b[1]))
+
+
+def _pick_near_far(players, w: int, h: int) -> List[dict]:
+    if not players:
+        return []
+    far_c = [p for p in players if _cy(p) < h * 0.52]
+    near_c = [p for p in players if _cy(p) >= h * 0.48]
+    out = []
+    if far_c:
+        p = min(far_c, key=lambda x: abs(_cx(x) - w * 0.5))
+        p = dict(p)
+        p["track_id"] = 1
+        out.append(p)
+    if near_c:
+        p = max(near_c, key=_area)
+        p = dict(p)
+        p["track_id"] = 2
+        if not out or abs(_cy(p) - _cy(out[0])) > 20:
+            out.append(p)
+    return out
+
+
 def foot_uv(kpts) -> Optional[tuple]:
     pts = []
     for i in (ANKLE_L, ANKLE_R):
@@ -33,9 +68,10 @@ def foot_uv(kpts) -> Optional[tuple]:
 
 
 class PlayerTracker:
-    def __init__(self, weights: str, conf: float = 0.35):
+    def __init__(self, weights: str, conf: float = 0.12, imgsz: int = 1280):
         self.model = YOLO(weights)
         self.conf = conf
+        self.imgsz = imgsz
 
     def reset(self):
         try:
@@ -44,11 +80,11 @@ class PlayerTracker:
             pass
 
     def detect(self, frame) -> List[dict]:
-        result = self.model.track(
+        result = self.model.predict(
             frame,
-            persist=True,
-            tracker="bytetrack.yaml",
             conf=self.conf,
+            imgsz=self.imgsz,
+            max_det=30,
             verbose=False,
         )[0]
         players = []
@@ -57,18 +93,18 @@ class PlayerTracker:
         boxes = result.boxes.xyxy.cpu().numpy()
         confs = result.boxes.conf.cpu().numpy()
         kpts = result.keypoints.xy.cpu().numpy()
-        ids = result.boxes.id
-        ids = ids.cpu().numpy() if ids is not None else np.arange(len(boxes))
-        for box, conf, tid, kp in zip(boxes, confs, ids, kpts):
-            players.append(
+        h, w = frame.shape[:2]
+        raw = []
+        for i, (box, conf, kp) in enumerate(zip(boxes, confs, kpts)):
+            raw.append(
                 {
-                    "track_id": int(tid),
+                    "track_id": int(i),
                     "bbox": [float(x) for x in box],
                     "confidence": float(conf),
                     "keypoints": kp.astype(float).tolist(),
                 }
             )
-        return players
+        return _pick_near_far(raw, w, h)
 
 
 def lift_players(players, det, image_shape, cam=None):
