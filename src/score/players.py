@@ -64,18 +64,24 @@ def foot_uv(kpts=None, bbox=None) -> Optional[Tuple[float, float]]:
     return None
 
 
-def _ref_half_masks(pad: int = 120):
-    x0 = int(REF_KPS[0, 0]) - pad
-    x1 = int(REF_KPS[1, 0]) + pad
-    y_far0 = int(REF_KPS[0, 1]) - pad
+def _area(p) -> float:
+    b = p["bbox"]
+    return max(0.0, (b[2] - b[0]) * (b[3] - b[1]))
+
+
+def _ref_half_masks():
+    # 球员常站在底线外：远端向上、近端向下多留出界外活动带
+    x0 = int(REF_KPS[0, 0]) - 200
+    x1 = int(REF_KPS[1, 0]) + 200
+    y_far0 = int(REF_KPS[0, 1]) - 450
     y_net = int(NET_Y)
-    y_near1 = int(REF_KPS[2, 1]) + pad
-    w = max(x1 + 1, int(REF_KPS[1, 0]) + pad + 1)
-    h = max(y_near1 + 1, int(REF_KPS[2, 1]) + pad + 1)
+    y_near1 = int(REF_KPS[2, 1]) + 700
+    w = max(x1 + 1, int(REF_KPS[1, 0]) + 220)
+    h = max(y_near1 + 1, int(REF_KPS[2, 1]) + 720)
     far = np.zeros((h, w), np.uint8)
     near = np.zeros((h, w), np.uint8)
-    cv2.rectangle(far, (x0, y_far0), (x1, y_net), 1, -1)
-    cv2.rectangle(near, (x0, y_net), (x1, y_near1), 1, -1)
+    cv2.rectangle(far, (x0, y_far0), (x1, y_net + 40), 1, -1)
+    cv2.rectangle(near, (x0, y_net - 40), (x1, y_near1), 1, -1)
     return far, near
 
 
@@ -92,20 +98,25 @@ def _warp_masks(det, shape) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     return far, near
 
 
-def _far_roi(det, w: int, h: int) -> Optional[Tuple[int, int, int, int]]:
+def _side_roi(det, w: int, h: int, side: str) -> Optional[Tuple[int, int, int, int]]:
     kps = getattr(det, "keypoints_xy", None) if det is not None else None
     if kps is None:
         return None
     pts = np.asarray(kps, dtype=np.float64).reshape(-1, 2)
     if pts.shape[0] < 14:
         return None
-    idx = (0, 1, 4, 6, 8, 9, 12)
-    xs = pts[[i for i in idx], 0]
-    ys = pts[[i for i in idx], 1]
-    x0 = int(max(0, xs.min() - 40))
-    x1 = int(min(w, xs.max() + 40))
-    y0 = int(max(0, ys.min() - 80))
-    y1 = int(min(h, ys.max() + 120))
+    if side == "far":
+        idx = (0, 1, 4, 6, 8, 9, 12)
+        pad_y0, pad_y1 = 100, 160
+    else:
+        idx = (2, 3, 5, 7, 10, 11, 13)
+        pad_y0, pad_y1 = 80, 220
+    xs = pts[list(idx), 0]
+    ys = pts[list(idx), 1]
+    x0 = int(max(0, xs.min() - 60))
+    x1 = int(min(w, xs.max() + 60))
+    y0 = int(max(0, ys.min() - pad_y0))
+    y1 = int(min(h, ys.max() + pad_y1))
     if x1 - x0 < 80 or y1 - y0 < 80:
         return None
     return x0, y0, x1, y1
@@ -116,6 +127,16 @@ def _in_mask(mask, uv) -> bool:
     if y < 0 or x < 0 or y >= mask.shape[0] or x >= mask.shape[1]:
         return False
     return mask[y, x] > 0
+
+
+def _probe_points(bbox) -> List[Tuple[float, float]]:
+    x1, y1, x2, y2 = bbox
+    cx = 0.5 * (x1 + x2)
+    return [
+        (cx, y2),
+        (cx, y1 + 0.85 * (y2 - y1)),
+        (cx, y1 + 0.70 * (y2 - y1)),
+    ]
 
 
 def _half_center(det, side: str) -> Optional[Tuple[float, float]]:
@@ -130,6 +151,33 @@ def _half_center(det, side: str) -> Optional[Tuple[float, float]]:
     return float(q[0]), float(q[1])
 
 
+def _assign_side(bbox, masks, H_inv, shape) -> Optional[str]:
+    for uv in _probe_points(bbox):
+        if masks is not None:
+            if _in_mask(masks[0], uv):
+                return "far"
+            if _in_mask(masks[1], uv):
+                return "near"
+        if H_inv is not None:
+            cxy = image_to_court(uv, H_inv)
+            if cxy is None:
+                continue
+            x0 = float(REF_KPS[0, 0]) - 250
+            x1 = float(REF_KPS[1, 0]) + 250
+            y0 = float(REF_KPS[0, 1]) - 500
+            y1 = float(REF_KPS[2, 1]) + 800
+            if not (x0 <= cxy[0] <= x1 and y0 <= cxy[1] <= y1):
+                continue
+            return "far" if cxy[1] < NET_Y else "near"
+    # 无 H 时：用画面上下半区兜底，近端取大框
+    cy = 0.5 * (bbox[1] + bbox[3])
+    if cy < shape[0] * 0.48:
+        return "far"
+    if cy > shape[0] * 0.52:
+        return "near"
+    return None
+
+
 def _select_players(players, det, shape) -> List[dict]:
     if not players:
         return []
@@ -137,50 +185,42 @@ def _select_players(players, det, shape) -> List[dict]:
     H_inv = _H_inv(det)
     buckets = {"far": [], "near": []}
     for p in players:
-        uv = foot_uv(bbox=p.get("bbox"))
-        if uv is None:
+        bbox = p.get("bbox")
+        if not bbox or len(bbox) < 4:
             continue
-        side = None
-        if masks is not None:
-            if _in_mask(masks[0], uv):
-                side = "far"
-            elif _in_mask(masks[1], uv):
-                side = "near"
-        if side is None and H_inv is not None:
-            cxy = image_to_court(uv, H_inv)
-            if cxy is None:
-                continue
-            x0 = float(REF_KPS[0, 0]) - 120
-            x1 = float(REF_KPS[1, 0]) + 120
-            y0 = float(REF_KPS[0, 1]) - 200
-            y1 = float(REF_KPS[2, 1]) + 200
-            if not (x0 <= cxy[0] <= x1 and y0 <= cxy[1] <= y1):
-                continue
-            side = "far" if cxy[1] < NET_Y else "near"
+        side = _assign_side(bbox, masks, H_inv, shape)
         if side is None:
             continue
         center = _half_center(det, side)
-        if center is not None:
+        uv = foot_uv(bbox=bbox)
+        if center is not None and uv is not None:
             dist = (uv[0] - center[0]) ** 2 + (uv[1] - center[1]) ** 2
         else:
-            dist = abs(uv[0] - shape[1] * 0.5)
+            dist = abs(0.5 * (bbox[0] + bbox[2]) - shape[1] * 0.5)
         q = dict(p)
         q["_dist"] = dist
+        q["_area"] = _area(p)
         buckets[side].append(q)
     out = []
     for side, tid in (("far", 1), ("near", 2)):
-        if not buckets[side]:
+        cands = buckets[side]
+        if not cands:
             continue
-        p = min(buckets[side], key=lambda x: x["_dist"])
+        # 近端：优先面积大（真球员远大于球童）；远端：优先靠近半场中心
+        if side == "near":
+            p = max(cands, key=lambda x: x["_area"] - 0.02 * x["_dist"])
+        else:
+            p = min(cands, key=lambda x: x["_dist"] - 0.15 * (x["_area"] ** 0.5))
         p["track_id"] = tid
         p["side"] = side
         p.pop("_dist", None)
+        p.pop("_area", None)
         out.append(p)
     return out
 
 
 class PlayerTracker:
-    def __init__(self, weights: str, conf: float = 0.15, imgsz: int = 1280):
+    def __init__(self, weights: str, conf: float = 0.12, imgsz: int = 1280):
         self.model = YOLO(weights)
         self.conf = conf
         self.imgsz = imgsz
@@ -237,8 +277,10 @@ class PlayerTracker:
     def detect(self, frame, court_det=None) -> List[dict]:
         h, w = frame.shape[:2]
         raw = self._run(frame)
-        roi = _far_roi(court_det, w, h)
-        if roi is not None:
+        for side in ("far", "near"):
+            roi = _side_roi(court_det, w, h, side)
+            if roi is None:
+                continue
             x0, y0, x1, y1 = roi
             crop = frame[y0:y1, x0:x1]
             if crop.size > 0:
@@ -246,6 +288,7 @@ class PlayerTracker:
         picked = _select_players(_nms(raw), court_det, frame.shape)
         by_side = {p["side"]: p for p in picked if p.get("side")}
         out = []
+        hold_max = {"far": 25, "near": 35}
         for side, tid in (("far", 1), ("near", 2)):
             if side in by_side:
                 p = by_side[side]
@@ -253,7 +296,7 @@ class PlayerTracker:
                 self.prev[side] = p
                 self.miss[side] = 0
                 out.append(p)
-            elif self.prev[side] is not None and self.miss[side] < 20:
+            elif self.prev[side] is not None and self.miss[side] < hold_max[side]:
                 self.miss[side] += 1
                 hold = dict(self.prev[side])
                 hold["track_id"] = tid

@@ -39,7 +39,7 @@ def _geom_bounces(xs, ys, min_gap: int = 8) -> List[int]:
     return keep
 
 
-def _catboost_bounces(xs, ys, model_path: str, threshold: float = 0.45) -> List[int]:
+def _catboost_bounces(xs, ys, model_path: str, threshold: float = 0.55) -> List[int]:
     import pandas as pd
     from catboost import CatBoostRegressor
     from scipy.interpolate import CubicSpline

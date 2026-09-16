@@ -205,22 +205,6 @@ def main():
             json.dump(payload, f, ensure_ascii=False, indent=2)
         print("ball raw/filled:", payload["raw_detect_count"], payload["filled_count"], "/", len(raw))
         print("shot_frames:", shot_frames)
-        score = None
-        if not args.skip_score:
-            score = analyze_score(
-                filled, court_dets, fps, args.bounce_weights, (height, width)
-            )
-            with open(os.path.join(args.out, "score.json"), "w", encoding="utf-8") as f:
-                json.dump(score, f, ensure_ascii=False, indent=2)
-            print("bounces:", score["num_bounces"])
-        traj3d = None
-        if not args.skip_3d:
-            traj3d = reconstruct_ball_3d(
-                filled, court_dets, fps, (height, width), args.bounce_weights
-            )
-            with open(os.path.join(args.out, "ball_3d.json"), "w", encoding="utf-8") as f:
-                json.dump(traj3d, f, ensure_ascii=False, indent=2)
-            print("3d frames:", sum(1 for r in traj3d["frames"] if r["xyz"]), "/", len(traj3d["frames"]))
         if player_tracker is not None:
             cam = None
             for i, pl in enumerate(pose_raw):
@@ -233,7 +217,36 @@ def main():
                     f,
                     ensure_ascii=False,
                 )
-            print("pose frames:", sum(1 for p in pose_lifted if p), "/", len(pose_lifted))
+            n_near = sum(1 for fr in pose_lifted if any(p.get("side") == "near" for p in fr))
+            n_far = sum(1 for fr in pose_lifted if any(p.get("side") == "far" for p in fr))
+            print("person frames near/far:", n_near, n_far, "/", len(pose_lifted))
+        score = None
+        if not args.skip_score:
+            score = analyze_score(
+                filled,
+                court_dets,
+                fps,
+                args.bounce_weights,
+                (height, width),
+                players=pose_lifted or None,
+                shot_frames=shot_frames,
+            )
+            with open(os.path.join(args.out, "score.json"), "w", encoding="utf-8") as f:
+                json.dump(score, f, ensure_ascii=False, indent=2)
+            print("bounces:", score["num_bounces"])
+        traj3d = None
+        if not args.skip_3d:
+            traj3d = reconstruct_ball_3d(
+                filled,
+                court_dets,
+                fps,
+                (height, width),
+                args.bounce_weights,
+                bounce_ids=[b["frame_id"] for b in score["bounces"]] if score else None,
+            )
+            with open(os.path.join(args.out, "ball_3d.json"), "w", encoding="utf-8") as f:
+                json.dump(traj3d, f, ensure_ascii=False, indent=2)
+            print("3d frames:", sum(1 for r in traj3d["frames"] if r["xyz"]), "/", len(traj3d["frames"]))
     else:
         ball_tracker = None
         score = None
