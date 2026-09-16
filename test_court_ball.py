@@ -32,7 +32,7 @@ from src.court.court_line_detector import (
     read_frame_at,
 )
 from src.score.pipeline import analyze_score
-from src.score.players import PlayerTracker, default_pose_weights, draw_players, lift_players
+from src.score.players import PlayerTracker, default_person_weights, draw_players, lift_players
 from src.score.traj3d import reconstruct_ball_3d
 from src.score.viz3d import write_traj3d_video
 
@@ -76,7 +76,7 @@ def parse_args():
     parser.add_argument("--skip-score", action="store_true")
     parser.add_argument("--skip-3d", action="store_true")
     parser.add_argument("--skip-pose", action="store_true")
-    parser.add_argument("--pose-weights", default=None)
+    parser.add_argument("--pose-weights", default=None, help="person 检测权重，默认 yolo26m.pt")
     parser.add_argument("--bounce-weights", default=None)
     return parser.parse_args()
 
@@ -139,13 +139,15 @@ def main():
     pose_lifted = []
     player_tracker = None
     if not args.skip_pose:
-        pose_weights = args.pose_weights or default_pose_weights()
+        pose_weights = args.pose_weights or default_person_weights()
         if pose_weights:
-            print("pose:", pose_weights)
-            player_tracker = PlayerTracker(pose_weights, conf=0.05, imgsz=max(1280, args.imgsz))
+            print("person:", pose_weights)
+            player_tracker = PlayerTracker(
+                pose_weights, conf=0.15, imgsz=max(1280, args.imgsz)
+            )
             player_tracker.reset()
         else:
-            print("pose: missing yolo26m-pose.pt, skip")
+            print("person: missing yolo26m.pt, skip")
     if not args.skip_ball:
         ball_weights = args.ball_weights
         ball_backend = args.ball_backend

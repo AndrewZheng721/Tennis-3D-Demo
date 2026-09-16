@@ -1,24 +1,40 @@
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+import cv2
 import numpy as np
 from ultralytics import YOLO
 
 from .court3d import estimate_camera, ray_at_z
-from .geom import H_inv_of, NET_X, NET_Y, REF_KPS, image_to_court
-
-ANKLE_L, ANKLE_R = 15, 16
+from .geom import NET_X, NET_Y, REF_KPS, image_to_court
 
 
-def default_pose_weights() -> Optional[str]:
+def default_person_weights() -> Optional[str]:
     for p in (
+        "weights/yolo26m.pt",
+        "weights/yolov8x.pt",
         "weights/yolo26m-pose.pt",
-        "weights/yolo26n-pose.pt",
-        os.path.join(os.path.dirname(__file__), "..", "..", "weights", "yolo26m-pose.pt"),
+        os.path.join(os.path.dirname(__file__), "..", "..", "weights", "yolo26m.pt"),
     ):
         if os.path.isfile(p):
             return os.path.abspath(p)
     return None
+
+
+def default_pose_weights() -> Optional[str]:
+    return default_person_weights()
+
+
+def _H_ref(det) -> Optional[np.ndarray]:
+    if det is None:
+        return None
+    return getattr(det, "homography_ref_to_image", None)
+
+
+def _H_inv(det) -> Optional[np.ndarray]:
+    if det is None:
+        return None
+    return getattr(det, "homography_image_to_ref", None)
 
 
 def _iou(a, b) -> float:
@@ -34,7 +50,7 @@ def _iou(a, b) -> float:
     return inter / ua if ua > 0 else 0.0
 
 
-def _nms(players, thr: float = 0.45) -> List[dict]:
+def _nms(players, thr: float = 0.5) -> List[dict]:
     keep = []
     for p in sorted(players, key=lambda x: x["confidence"], reverse=True):
         if all(_iou(p["bbox"], q["bbox"]) < thr for q in keep):
@@ -42,44 +58,112 @@ def _nms(players, thr: float = 0.45) -> List[dict]:
     return keep
 
 
-def _in_play(court_xy) -> bool:
-    x, y = court_xy
-    x0 = float(REF_KPS[0, 0]) - 90
-    x1 = float(REF_KPS[1, 0]) + 90
-    y0 = float(REF_KPS[0, 1]) - 280
-    y1 = float(REF_KPS[2, 1]) + 280
-    return x0 <= x <= x1 and y0 <= y <= y1
+def foot_uv(kpts=None, bbox=None) -> Optional[Tuple[float, float]]:
+    if bbox and len(bbox) >= 4:
+        return float((bbox[0] + bbox[2]) * 0.5), float(bbox[3])
+    return None
 
 
-def _select_players(players, det, w: int, h: int) -> List[dict]:
+def _ref_half_masks(pad: int = 120):
+    x0 = int(REF_KPS[0, 0]) - pad
+    x1 = int(REF_KPS[1, 0]) + pad
+    y_far0 = int(REF_KPS[0, 1]) - pad
+    y_net = int(NET_Y)
+    y_near1 = int(REF_KPS[2, 1]) + pad
+    w = max(x1 + 1, int(REF_KPS[1, 0]) + pad + 1)
+    h = max(y_near1 + 1, int(REF_KPS[2, 1]) + pad + 1)
+    far = np.zeros((h, w), np.uint8)
+    near = np.zeros((h, w), np.uint8)
+    cv2.rectangle(far, (x0, y_far0), (x1, y_net), 1, -1)
+    cv2.rectangle(near, (x0, y_net), (x1, y_near1), 1, -1)
+    return far, near
+
+
+_REF_FAR, _REF_NEAR = _ref_half_masks()
+
+
+def _warp_masks(det, shape) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    H = _H_ref(det)
+    if H is None:
+        return None
+    h, w = shape[:2]
+    far = cv2.warpPerspective(_REF_FAR, H.astype(np.float64), (w, h))
+    near = cv2.warpPerspective(_REF_NEAR, H.astype(np.float64), (w, h))
+    return far, near
+
+
+def _far_roi(det, w: int, h: int) -> Optional[Tuple[int, int, int, int]]:
+    kps = getattr(det, "keypoints_xy", None) if det is not None else None
+    if kps is None:
+        return None
+    pts = np.asarray(kps, dtype=np.float64).reshape(-1, 2)
+    if pts.shape[0] < 14:
+        return None
+    idx = (0, 1, 4, 6, 8, 9, 12)
+    xs = pts[[i for i in idx], 0]
+    ys = pts[[i for i in idx], 1]
+    x0 = int(max(0, xs.min() - 40))
+    x1 = int(min(w, xs.max() + 40))
+    y0 = int(max(0, ys.min() - 80))
+    y1 = int(min(h, ys.max() + 120))
+    if x1 - x0 < 80 or y1 - y0 < 80:
+        return None
+    return x0, y0, x1, y1
+
+
+def _in_mask(mask, uv) -> bool:
+    x, y = int(round(uv[0])), int(round(uv[1]))
+    if y < 0 or x < 0 or y >= mask.shape[0] or x >= mask.shape[1]:
+        return False
+    return mask[y, x] > 0
+
+
+def _half_center(det, side: str) -> Optional[Tuple[float, float]]:
+    H = _H_ref(det)
+    if H is None:
+        return None
+    if side == "far":
+        p = np.array([[[NET_X, (REF_KPS[0, 1] + NET_Y) * 0.5]]], dtype=np.float32)
+    else:
+        p = np.array([[[NET_X, (REF_KPS[2, 1] + NET_Y) * 0.5]]], dtype=np.float32)
+    q = cv2.perspectiveTransform(p, H.astype(np.float32))[0, 0]
+    return float(q[0]), float(q[1])
+
+
+def _select_players(players, det, shape) -> List[dict]:
     if not players:
         return []
-    H = H_inv_of(det)
-    kps = None
-    if det is not None and getattr(det, "keypoints_xy", None) is not None:
-        kps = np.asarray(det.keypoints_xy, dtype=np.float64).reshape(-1, 2)
-    net_y_img = None
-    if kps is not None and len(kps) >= 14:
-        net_y_img = 0.5 * (float(kps[12, 1]) + float(kps[13, 1]))
+    masks = _warp_masks(det, shape)
+    H_inv = _H_inv(det)
     buckets = {"far": [], "near": []}
     for p in players:
-        uv = foot_uv(p.get("keypoints") or [], p.get("bbox"))
+        uv = foot_uv(bbox=p.get("bbox"))
         if uv is None:
             continue
-        court_xy = image_to_court(uv, H) if H is not None else None
-        if court_xy is not None:
-            if not _in_play(court_xy):
+        side = None
+        if masks is not None:
+            if _in_mask(masks[0], uv):
+                side = "far"
+            elif _in_mask(masks[1], uv):
+                side = "near"
+        if side is None and H_inv is not None:
+            cxy = image_to_court(uv, H_inv)
+            if cxy is None:
                 continue
-            side = "far" if court_xy[1] < NET_Y else "near"
-            dist = abs(court_xy[0] - NET_X)
-        elif net_y_img is not None and kps is not None:
-            side = "far" if uv[1] < net_y_img else "near"
-            idx = (0, 1, 4, 6, 8, 9, 12) if side == "far" else (2, 3, 5, 7, 10, 11, 13)
-            dist = min(
-                ((uv[0] - kps[i, 0]) ** 2 + (uv[1] - kps[i, 1]) ** 2) ** 0.5 for i in idx
-            )
-        else:
+            x0 = float(REF_KPS[0, 0]) - 120
+            x1 = float(REF_KPS[1, 0]) + 120
+            y0 = float(REF_KPS[0, 1]) - 200
+            y1 = float(REF_KPS[2, 1]) + 200
+            if not (x0 <= cxy[0] <= x1 and y0 <= cxy[1] <= y1):
+                continue
+            side = "far" if cxy[1] < NET_Y else "near"
+        if side is None:
             continue
+        center = _half_center(det, side)
+        if center is not None:
+            dist = (uv[0] - center[0]) ** 2 + (uv[1] - center[1]) ** 2
+        else:
+            dist = abs(uv[0] - shape[1] * 0.5)
         q = dict(p)
         q["_dist"] = dist
         buckets[side].append(q)
@@ -89,30 +173,18 @@ def _select_players(players, det, w: int, h: int) -> List[dict]:
             continue
         p = min(buckets[side], key=lambda x: x["_dist"])
         p["track_id"] = tid
+        p["side"] = side
         p.pop("_dist", None)
         out.append(p)
     return out
 
 
-def foot_uv(kpts, bbox=None) -> Optional[tuple]:
-    pts = []
-    for i in (ANKLE_L, ANKLE_R):
-        if i < len(kpts):
-            x, y = float(kpts[i][0]), float(kpts[i][1])
-            if np.isfinite(x) and np.isfinite(y) and x > 1 and y > 1:
-                pts.append((x, y))
-    if pts:
-        return float(sum(p[0] for p in pts) / len(pts)), float(sum(p[1] for p in pts) / len(pts))
-    if bbox and len(bbox) >= 4:
-        return float((bbox[0] + bbox[2]) * 0.5), float(bbox[3])
-    return None
-
-
 class PlayerTracker:
-    def __init__(self, weights: str, conf: float = 0.05, imgsz: int = 1280):
+    def __init__(self, weights: str, conf: float = 0.15, imgsz: int = 1280):
         self.model = YOLO(weights)
         self.conf = conf
         self.imgsz = imgsz
+        self.is_pose = "pose" in os.path.basename(weights).lower()
         self.prev = {"far": None, "near": None}
         self.miss = {"far": 0, "near": 0}
 
@@ -124,47 +196,69 @@ class PlayerTracker:
         self.prev = {"far": None, "near": None}
         self.miss = {"far": 0, "near": 0}
 
-    def _run(self, image) -> List[dict]:
-        result = self.model.predict(
-            image,
+    def _run(self, image, ox: float = 0.0, oy: float = 0.0) -> List[dict]:
+        kwargs = dict(
             conf=self.conf,
             imgsz=self.imgsz,
-            max_det=40,
+            max_det=50,
             verbose=False,
-        )[0]
-        if result.boxes is None or result.keypoints is None:
+        )
+        if not self.is_pose:
+            kwargs["classes"] = [0]
+        result = self.model.predict(image, **kwargs)[0]
+        if result.boxes is None or len(result.boxes) == 0:
             return []
         boxes = result.boxes.xyxy.cpu().numpy()
         confs = result.boxes.conf.cpu().numpy()
-        kpts = result.keypoints.xy.cpu().numpy()
+        kpts = None
+        if self.is_pose and result.keypoints is not None:
+            kpts = result.keypoints.xy.cpu().numpy()
         out = []
-        for i, (box, conf, kp) in enumerate(zip(boxes, confs, kpts)):
-            out.append(
-                {
-                    "track_id": int(i),
-                    "bbox": [float(x) for x in box],
-                    "confidence": float(conf),
-                    "keypoints": kp.astype(float).tolist(),
-                }
-            )
+        for i, (box, conf) in enumerate(zip(boxes, confs)):
+            b = [
+                float(box[0] + ox),
+                float(box[1] + oy),
+                float(box[2] + ox),
+                float(box[3] + oy),
+            ]
+            item = {
+                "track_id": int(i),
+                "bbox": b,
+                "confidence": float(conf),
+                "keypoints": None,
+            }
+            if kpts is not None and i < len(kpts):
+                item["keypoints"] = [
+                    [float(xy[0] + ox), float(xy[1] + oy)] for xy in kpts[i]
+                ]
+            out.append(item)
         return out
 
     def detect(self, frame, court_det=None) -> List[dict]:
         h, w = frame.shape[:2]
         raw = self._run(frame)
-        y1 = int(h * 0.48)
-        raw.extend(self._run(frame[:y1, :]))
-        picked = _select_players(_nms(raw), court_det, w, h)
-        by_id = {p["track_id"]: p for p in picked}
+        roi = _far_roi(court_det, w, h)
+        if roi is not None:
+            x0, y0, x1, y1 = roi
+            crop = frame[y0:y1, x0:x1]
+            if crop.size > 0:
+                raw.extend(self._run(crop, ox=x0, oy=y0))
+        picked = _select_players(_nms(raw), court_det, frame.shape)
+        by_side = {p["side"]: p for p in picked if p.get("side")}
         out = []
         for side, tid in (("far", 1), ("near", 2)):
-            if tid in by_id:
-                self.prev[side] = by_id[tid]
+            if side in by_side:
+                p = by_side[side]
+                p["track_id"] = tid
+                self.prev[side] = p
                 self.miss[side] = 0
-                out.append(by_id[tid])
-            elif self.prev[side] is not None and self.miss[side] < 18:
+                out.append(p)
+            elif self.prev[side] is not None and self.miss[side] < 20:
                 self.miss[side] += 1
-                out.append(self.prev[side])
+                hold = dict(self.prev[side])
+                hold["track_id"] = tid
+                hold["side"] = side
+                out.append(hold)
             else:
                 self.miss[side] += 1
         return out
@@ -178,14 +272,14 @@ def lift_players(players, det, image_shape, cam=None):
     h = image_shape[0]
     out = []
     for p in players:
-        uv = foot_uv(p.get("keypoints") or [], p.get("bbox"))
+        uv = foot_uv(p.get("keypoints"), p.get("bbox"))
         xyz = ray_at_z(cam, uv, 0.0) if uv is not None else None
-        if xyz is not None:
-            side = "far" if xyz[1] >= 0 else "near"
-        elif uv is not None:
-            side = "near" if uv[1] > h * 0.55 else "far"
-        else:
-            side = None
+        side = p.get("side")
+        if side is None:
+            if xyz is not None:
+                side = "far" if xyz[1] >= 0 else "near"
+            elif uv is not None:
+                side = "near" if uv[1] > h * 0.55 else "far"
         q = dict(p)
         q["foot_xy"] = None if uv is None else [uv[0], uv[1]]
         q["xyz"] = None if xyz is None else [xyz[0], xyz[1], xyz[2]]
@@ -195,8 +289,6 @@ def lift_players(players, det, image_shape, cam=None):
 
 
 def draw_players(img, players):
-    import cv2
-
     for p in players:
         box = p.get("bbox") or []
         if len(box) < 4:
