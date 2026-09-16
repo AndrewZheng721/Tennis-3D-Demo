@@ -39,7 +39,7 @@ def _geom_bounces(xs, ys, min_gap: int = 8) -> List[int]:
     return keep
 
 
-def _catboost_bounces(xs, ys, model_path: str, threshold: float = 0.55) -> List[int]:
+def _catboost_bounces(xs, ys, model_path: str, threshold: float = 0.45) -> List[int]:
     import pandas as pd
     from catboost import CatBoostRegressor
     from scipy.interpolate import CubicSpline
@@ -122,9 +122,30 @@ def default_bounce_weights() -> Optional[str]:
 def detect_bounces(filled, model_path: Optional[str] = None) -> List[int]:
     xs, ys = _centers(filled)
     path = model_path or default_bounce_weights()
+    ids = []
     if path:
         try:
-            return _catboost_bounces(xs, ys, path)
+            ids = _catboost_bounces(xs, ys, path, threshold=0.40)
         except Exception:
-            pass
-    return _geom_bounces(xs, ys)
+            ids = []
+    if not ids:
+        ids = _geom_bounces(xs, ys)
+    else:
+        # 补上 CatBoost 漏掉、但 y 换向明显的候选（提高召回）
+        geom = set(_geom_bounces(xs, ys, min_gap=10))
+        have = set(ids)
+        for g in geom:
+            if any(abs(g - h) < 10 for h in have):
+                continue
+            if g < 2 or g >= len(ys) - 2:
+                continue
+            if ys[g] is None or ys[g - 1] is None or ys[g + 1] is None:
+                continue
+            # 高位：落地多为图像 y 的局部峰
+            if ys[g] >= ys[g - 1] and ys[g] >= ys[g + 1]:
+                amp = abs(ys[g + 1] - ys[g - 1])
+                if amp >= 6:
+                    ids.append(g)
+                    have.add(g)
+        ids = sorted(ids)
+    return ids
