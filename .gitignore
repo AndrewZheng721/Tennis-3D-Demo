@@ -10,7 +10,5 @@ env/
 .DS_Store
 .idea/
 high_angle_dataset/*.zip
-high_angle_dataset/tennis_high_angle_02.mp4
-high_angle_dataset/tennis_high_angle_03.mp4
-high_angle_dataset/tennis_high_angle_04.mp4
+high_angle_dataset/*.mp4
 汇报材料/
