@@ -101,8 +101,15 @@ def _process_video(path, out_root, court, tracker, players, max_frames):
             ok, frame = cap.read()
             if not ok:
                 break
+            if prev_det is None and n % 8 != 0:
+                filled_raw.append({})
+                pose.append([])
+                court_ok.append(False)
+                n += 1
+                bar.update(1)
+                continue
             try:
-                gray, det = court.track_frame(frame, n, prev_gray, prev_det)
+                gray, det = court.track_frame(frame, n, prev_gray, prev_det, redetect_every=60)
                 use = bool(det.quality_ok)
             except RuntimeError:
                 gray, det, use = None, None, False
@@ -110,7 +117,12 @@ def _process_video(path, out_root, court, tracker, players, max_frames):
                 prev_gray, prev_det = gray, det
                 tracker.set_court(det.keypoints_xy)
                 filled_raw.append(tracker.detect_frame(frame))
-                pose.append(players.detect(frame, det) if players is not None else [])
+                if players is None:
+                    pose.append([])
+                elif n % 5 == 0 or not pose or not pose[-1]:
+                    pose.append(players.detect(frame, det))
+                else:
+                    pose.append(pose[-1])
             else:
                 prev_gray, prev_det = None, None
                 tracker.reset()
