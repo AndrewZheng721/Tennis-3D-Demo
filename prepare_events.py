@@ -109,7 +109,7 @@ def _process_video(path, out_root, court, tracker, players, max_frames):
                 bar.update(1)
                 continue
             try:
-                gray, det = court.track_frame(frame, n, prev_gray, prev_det, redetect_every=60)
+                gray, det = court.track_frame(frame, n, prev_gray, prev_det, redetect_every=60, fast=True)
                 use = bool(det.quality_ok)
             except RuntimeError:
                 gray, det, use = None, None, False
@@ -120,7 +120,7 @@ def _process_video(path, out_root, court, tracker, players, max_frames):
                 if players is None:
                     pose.append([])
                 elif n % 5 == 0 or not pose or not pose[-1]:
-                    pose.append(players.detect(frame, det))
+                    pose.append(players.detect(frame, det, roi=False))
                 else:
                     pose.append(pose[-1])
             else:
@@ -176,7 +176,7 @@ def main():
     court = CourtLineDetector(heatmap_path=args.heatmap_weights)
     tracker = create_ball_tracker(ball_w)
     pose_w = args.pose_weights or default_person_weights()
-    person = PlayerTracker(pose_w) if pose_w else None
+    person = PlayerTracker(pose_w, imgsz=640) if pose_w else None
     os.makedirs(args.out, exist_ok=True)
     for path in paths:
         _process_video(path, args.out, court, tracker, person, args.max_frames)

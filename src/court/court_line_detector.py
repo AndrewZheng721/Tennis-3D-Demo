@@ -558,11 +558,13 @@ class CourtLineDetector:
             keypoints, H, H_inv, image, frame_id, "resnet", usable, reason
         )
 
-    def predict(self, image: np.ndarray, frame_id: int = 0) -> CourtDetection:
+    def predict(self, image: np.ndarray, frame_id: int = 0, fast: bool = False) -> CourtDetection:
         """优先热力图，其次几何法，最后才是 ResNet。"""
         heat = self._heatmap_detection(image, frame_id)
-        if heat is not None and heat.quality_ok:
+        if heat is not None and (heat.quality_ok or fast):
             return heat
+        if fast:
+            raise RuntimeError("球场检测失败")
         geo = self._geometric_detection(image, frame_id)
         if geo is not None and geo.quality_ok:
             return geo
@@ -603,7 +605,7 @@ class CourtLineDetector:
             raise RuntimeError("球场检测失败")
         return best[1]
 
-    def _ecc_affine(self, prev_gray: np.ndarray, curr_gray: np.ndarray):
+    def _ecc_affine(self, prev_gray: np.ndarray, curr_gray: np.ndarray, iters: int = 40):
         """估计上一帧到当前帧的仿射变换，用来跟着摄像机推拉摇。
 
         转播主镜头几乎每秒都在动。如果只用第 0 帧的球场点，后面网格会慢慢离开白线。
@@ -619,7 +621,7 @@ class CourtLineDetector:
             a, b = prev_gray, curr_gray
             scale = 1.0
         warp = np.eye(2, 3, dtype=np.float32)
-        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 40, 1e-4)
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, iters, 1e-4 if iters > 8 else 1e-3)
         try:
             cc, warp = cv2.findTransformECC(
                 a, b, warp, cv2.MOTION_AFFINE, criteria, None, 5
@@ -649,6 +651,7 @@ class CourtLineDetector:
         prev_gray,
         prev_det: Optional[CourtDetection],
         redetect_every: int = 30,
+        fast: bool = False,
     ):
         """逐帧跟上机位：平时用 ECC 拖点，隔一段时间重新跑热力图。"""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -657,7 +660,7 @@ class CourtLineDetector:
         )
         if must:
             try:
-                det = self.predict(image, frame_id)
+                det = self.predict(image, frame_id, fast=fast)
                 if det.quality_ok or prev_det is None:
                     return gray, det
             except RuntimeError:
@@ -665,10 +668,11 @@ class CourtLineDetector:
                     raise
 
         if prev_det is not None and prev_gray is not None:
-            warp, cc = self._ecc_affine(prev_gray, gray)
+            warp, cc = self._ecc_affine(prev_gray, gray, iters=8 if fast else 40)
             if warp is not None and cc >= 0.2:
                 kps = self._apply_affine(prev_det.keypoints, warp)
-                kps = align_keypoints_to_white_lines(image, kps)
+                if not fast:
+                    kps = align_keypoints_to_white_lines(image, kps)
                 kps, H, H_inv = self._homography_snap(kps)
                 ok, reason = self.assess_quality(kps, image.shape)
                 base = prev_det.method.split("+")[0]
@@ -684,7 +688,7 @@ class CourtLineDetector:
                 )
 
         try:
-            return gray, self.predict(image, frame_id)
+            return gray, self.predict(image, frame_id, fast=fast)
         except RuntimeError:
             if prev_det is None:
                 raise

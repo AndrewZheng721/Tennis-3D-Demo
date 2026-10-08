@@ -274,9 +274,30 @@ class PlayerTracker:
             out.append(item)
         return out
 
-    def detect(self, frame, court_det=None) -> List[dict]:
+    def detect(self, frame, court_det=None, roi: bool = True) -> List[dict]:
         h, w = frame.shape[:2]
         raw = self._run(frame)
+        if not roi:
+            picked = _select_players(_nms(raw), court_det, frame.shape)
+            by_side = {p["side"]: p for p in picked if p.get("side")}
+            out = []
+            hold_max = {"far": 25, "near": 35}
+            for side, tid in (("far", 1), ("near", 2)):
+                if side in by_side:
+                    p = by_side[side]
+                    p["track_id"] = tid
+                    self.prev[side] = p
+                    self.miss[side] = 0
+                    out.append(p)
+                elif self.prev[side] is not None and self.miss[side] < hold_max[side]:
+                    self.miss[side] += 1
+                    hold = dict(self.prev[side])
+                    hold["track_id"] = tid
+                    hold["side"] = side
+                    out.append(hold)
+                else:
+                    self.miss[side] += 1
+            return out
         for side in ("far", "near"):
             roi = _side_roi(court_det, w, h, side)
             if roi is None:

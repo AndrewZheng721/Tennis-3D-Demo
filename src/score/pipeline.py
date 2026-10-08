@@ -1,4 +1,7 @@
+import os
 from typing import List, Optional
+
+import pandas as pd
 
 from .bounce import _centers, _geom_bounces, detect_bounces
 from .court3d import DB, NET, classify_xy, estimate_camera, ray_at_z
@@ -87,6 +90,39 @@ def _court_y_reversed(filled, fid, cam, span: int = 3) -> bool:
     return min(abs(vy_in), abs(vy_out)) >= 0.6
 
 
+def _eventnet_path() -> Optional[str]:
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (
+        "weights/eventnet.pt",
+        os.path.join(here, "..", "..", "weights", "eventnet.pt"),
+    ):
+        if os.path.isfile(p):
+            return os.path.abspath(p)
+    return None
+
+
+def _eventnet_bounce_ids(filled, players):
+    path = _eventnet_path()
+    if not path:
+        return None
+    from .eventnet import load_eventnet, predict_status
+
+    rows = []
+    for item in filled:
+        uv = ball_center(item.get(1, []))
+        if uv is None:
+            rows.append((0, 0, 0, 0))
+        else:
+            rows.append((1, uv[0], uv[1], 0))
+    df = pd.DataFrame(rows, columns=["visibility", "x-coordinate", "y-coordinate", "status"])
+    packed = None
+    if players:
+        packed = {"frames": [{"frame_id": i, "players": pl} for i, pl in enumerate(players)]}
+    model = load_eventnet(path)
+    pred = predict_status(model, df, packed)
+    return [i for i, s in enumerate(pred) if int(s) == 2]
+
+
 def analyze_score(
     filled,
     court_dets,
@@ -96,9 +132,15 @@ def analyze_score(
     players=None,
     shot_frames: Optional[List[int]] = None,
 ):
-    bounce_ids = set(detect_bounces(filled, bounce_weights))
-    xs, ys = _centers(filled)
-    hit_ids = set(_geom_bounces(xs, ys, min_gap=6))
+    net_ids = _eventnet_bounce_ids(filled, players)
+    use_net = net_ids is not None
+    if use_net:
+        bounce_ids = set(net_ids)
+        hit_ids = set()
+    else:
+        bounce_ids = set(detect_bounces(filled, bounce_weights))
+        xs, ys = _centers(filled)
+        hit_ids = set(_geom_bounces(xs, ys, min_gap=6))
     bounces = []
     cam = None
     last = -999
@@ -112,7 +154,7 @@ def analyze_score(
             continue
         det = court_dets[raw_fid] if court_dets and raw_fid < len(court_dets) else None
         cam = _update_cam(cam, det, image_shape)
-        fid = _snap_landing(filled, int(raw_fid), cam, image_shape)
+        fid = int(raw_fid) if use_net else _snap_landing(filled, int(raw_fid), cam, image_shape)
         if fid in seen:
             continue
         det = court_dets[fid] if court_dets and fid < len(court_dets) else None
@@ -122,7 +164,7 @@ def analyze_score(
             continue
         pl = players[fid] if players and fid < len(players) else None
         side = _ball_side(xyz, uv, image_shape)
-        is_hit = _near_racket(uv, pl) or _court_y_reversed(filled, fid, cam)
+        is_hit = False if use_net else _near_racket(uv, pl) or _court_y_reversed(filled, fid, cam)
         if is_hit:
             if side:
                 last_hit_side = side
@@ -135,9 +177,9 @@ def analyze_score(
             continue
         if abs(xyz[0]) > DB + 2.5 or abs(xyz[1]) > NET + 3.0:
             continue
-        if last_hit_side and side == last_hit_side:
+        if not use_net and last_hit_side and side == last_hit_side:
             continue
-        if last_bounce_side and side == last_bounce_side:
+        if not use_net and last_bounce_side and side == last_bounce_side:
             continue
         info = classify_xy(xyz[0], xyz[1], eps=0.12)
         seen.add(fid)
