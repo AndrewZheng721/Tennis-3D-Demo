@@ -89,7 +89,7 @@ def _read(cap, fid, pos):
     return ok, frame, fid + 1
 
 
-def _draw(frame, fid, ball, fixes, jumps, scale):
+def _draw(frame, fid, ball, fixes, jumps, scale, mark_a):
     view = frame
     if scale != 1.0:
         view = cv2.resize(frame, (int(frame.shape[1] * scale), int(frame.shape[0] * scale)))
@@ -120,12 +120,14 @@ def _draw(frame, fid, ball, fixes, jumps, scale):
         cv2.circle(view, (24, 24), 10, (0, 0, 255), -1)
     gone = fid in fixes and fixes[fid][2] <= 0
     tag = "NO BALL" if gone else ("fixed" if fid in fixes else "auto")
+    if mark_a is not None:
+        tag += f"  range {mark_a}"
     h, w = view.shape[:2]
     cv2.rectangle(view, (0, h - 64), (w, h), (0, 0, 0), -1)
     cv2.putText(view, f"frame {fid}  {tag}", (16, h - 38), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(
         view,
-        "click ball   0 no ball   u undo   n/p jump   space play   a/d step   q/e +/-10   esc save",
+        "click ball   0 no ball   [ ] range0   u undo   n/p jump   space a/d q/e   esc save",
         (16, h - 12),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
@@ -184,6 +186,7 @@ def run(video):
     fid = jumps[0] if jumps else 0
     pos = None
     paused = True
+    mark_a = None
     scale = 1.0
     mouse = {"click": None, "cb": _on_mouse}
     shown = None
@@ -201,7 +204,7 @@ def run(video):
         frame = shown
         h, w = frame.shape[:2]
         scale = min(1.0, 1400.0 / max(w, 1))
-        view = _draw(frame, fid, ball, fixes, set(jumps), scale)
+        view = _draw(frame, fid, ball, fixes, set(jumps), scale, mark_a)
         cv2.imshow(win, view)
         if not hooked:
             cv2.waitKey(1)
@@ -246,6 +249,19 @@ def run(video):
             paused = True
             jumps = _jumps(ball, fixes, total)
             _save(video, fixes)
+        elif code == ord("["):
+            mark_a = fid
+            paused = True
+        elif code == ord("]"):
+            if mark_a is not None:
+                a, b = (mark_a, fid) if mark_a <= fid else (fid, mark_a)
+                for i in range(a, b + 1):
+                    fixes[i] = (0, 0, 0)
+                print("range0", a, b, b - a + 1)
+                mark_a = None
+                paused = True
+                jumps = _jumps(ball, fixes, total)
+                _save(video, fixes)
         elif code == ord("u"):
             fixes.pop(fid, None)
             paused = True
