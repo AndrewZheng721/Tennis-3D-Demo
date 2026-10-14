@@ -132,19 +132,30 @@ def _jump_to(keys, fid, step):
     return prv[-1] if prv else keys[0]
 
 
+def _on_mouse(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN:
+        param["click"] = (x, y)
+
+
 def _click_xy(win, click, view_w, view_h, scale, frame_w, frame_h):
-    x, y = float(click[0]), float(click[1])
+    raw = (float(click[0]), float(click[1]))
+    cands = [raw]
     try:
         rx, ry, rw, rh = cv2.getWindowImageRect(win)
         if rw > 1 and rh > 1:
-            x = (x - rx) * view_w / float(rw)
-            y = (y - ry) * view_h / float(rh)
+            cands.append(((raw[0] - rx) * view_w / float(rw), (raw[1] - ry) * view_h / float(rh)))
     except Exception:
         pass
-    if x < 0 or y < 0 or x >= view_w or y >= view_h - 64:
-        return None
-    ox = min(max(int(round(x / scale)), 0), frame_w - 1)
-    oy = min(max(int(round(y / scale)), 0), frame_h - 1)
+    picked = None
+    for x, y in cands:
+        if 0 <= x < view_w and 0 <= y < view_h:
+            picked = (x, y)
+            break
+    if picked is None:
+        x, y = cands[-1]
+        picked = (min(max(x, 0), view_w - 1), min(max(y, 0), view_h - 1))
+    ox = min(max(int(round(picked[0] / scale)), 0), frame_w - 1)
+    oy = min(max(int(round(picked[1] / scale)), 0), frame_h - 1)
     return ox, oy
 
 
@@ -161,12 +172,12 @@ def run(video):
     pos = None
     paused = True
     scale = 1.0
-    mouse = {"click": None}
+    mouse = {"click": None, "cb": _on_mouse}
     shown = None
     shown_fid = None
+    hooked = False
     win = "ball " + _stem(video)
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    cv2.setMouseCallback(win, lambda e, x, y, f, p: p.update(click=(x, y)) if e == cv2.EVENT_LBUTTONDOWN else None, mouse)
     while True:
         if shown_fid != fid:
             ok, frame, pos = _read(cap, fid, pos)
@@ -179,16 +190,20 @@ def run(video):
         scale = min(1.0, 1400.0 / max(w, 1))
         view = _draw(frame, fid, ball, fixes, set(jumps), scale)
         cv2.imshow(win, view)
+        if not hooked:
+            cv2.waitKey(1)
+            cv2.setMouseCallback(win, mouse["cb"], mouse)
+            hooked = True
         key = cv2.waitKeyEx(30 if paused else max(1, int(1000 / fps)))
         click = mouse["click"]
         mouse["click"] = None
         if click is not None:
             pt = _click_xy(win, click, view.shape[1], view.shape[0], scale, w, h)
-            if pt is not None:
-                fixes[fid] = (pt[0], pt[1], 1)
-                paused = True
-                jumps = _jumps(ball, fixes, total)
-                _save(video, fixes)
+            fixes[fid] = (pt[0], pt[1], 1)
+            paused = True
+            print("click", fid, pt[0], pt[1])
+            jumps = _jumps(ball, fixes, total)
+            _save(video, fixes)
             continue
         if key in (-1, 0):
             if not paused:
