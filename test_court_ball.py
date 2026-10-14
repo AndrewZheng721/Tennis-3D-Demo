@@ -231,6 +231,32 @@ def main():
                 players=pose_lifted or None,
                 shot_frames=shot_frames,
             )
+            if court_detector is not None and score and score["bounces"]:
+                n_ok = 0
+                for b in score["bounces"]:
+                    fid = int(b["frame_id"])
+                    if fid < 0 or fid >= len(court_dets):
+                        continue
+                    frame = read_frame_at(cap, fid)
+                    if frame is None:
+                        continue
+                    try:
+                        det = court_detector.predict(frame, frame_id=fid, fast=False)
+                    except RuntimeError:
+                        continue
+                    if det.quality_ok:
+                        court_dets[fid] = det
+                        n_ok += 1
+                print("bounce court redetect:", n_ok, "/", len(score["bounces"]))
+                score = analyze_score(
+                    filled,
+                    court_dets,
+                    fps,
+                    args.bounce_weights,
+                    (height, width),
+                    players=pose_lifted or None,
+                    shot_frames=shot_frames,
+                )
             with open(os.path.join(args.out, "score.json"), "w", encoding="utf-8") as f:
                 json.dump(score, f, ensure_ascii=False, indent=2)
             print("bounces:", score["num_bounces"])
