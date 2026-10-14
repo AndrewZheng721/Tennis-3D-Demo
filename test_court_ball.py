@@ -28,6 +28,7 @@ from tqdm import tqdm
 from src.ball.tracknet_tracker import create_ball_tracker, default_ball_weights
 from src.court.court_line_detector import (
     CourtLineDetector,
+    ball_on_singles_line,
     choose_sample_ids,
     read_frame_at,
 )
@@ -257,6 +258,24 @@ def main():
                     players=pose_lifted or None,
                     shot_frames=shot_frames,
                 )
+                n_line = 0
+                for b in score["bounces"]:
+                    if b.get("in_singles"):
+                        continue
+                    fid = int(b["frame_id"])
+                    uv = b.get("image_xy")
+                    det = court_dets[fid] if 0 <= fid < len(court_dets) else None
+                    frame = read_frame_at(cap, fid)
+                    if det is None or frame is None or uv is None:
+                        continue
+                    if not ball_on_singles_line(frame, det.keypoints_xy, uv):
+                        continue
+                    b["in_singles"] = True
+                    side = b.get("side") or ("far" if (b.get("xyz") or [0, 0])[1] >= 0 else "near")
+                    b["rally_zone"] = "far_in" if side == "far" else "near_in"
+                    b["side"] = side
+                    n_line += 1
+                print("line calls flipped to in:", n_line)
             with open(os.path.join(args.out, "score.json"), "w", encoding="utf-8") as f:
                 json.dump(score, f, ensure_ascii=False, indent=2)
             print("bounces:", score["num_bounces"])

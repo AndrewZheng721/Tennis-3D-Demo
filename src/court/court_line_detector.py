@@ -169,6 +169,59 @@ def _sample_line_offsets(mask: np.ndarray, pts: np.ndarray, pairs, along_x: bool
     return offsets
 
 
+def ball_on_singles_line(image: np.ndarray, keypoints_xy, uv, px_tol: float = 16.0, search: int = 70) -> bool:
+    if uv is None:
+        return False
+    pts = np.asarray(keypoints_xy, np.float32).reshape(-1, 2)
+    if pts.shape[0] < 8:
+        return False
+    mask = white_line_mask(image)
+    h, w = mask.shape[:2]
+    x, y = float(uv[0]), float(uv[1])
+    edges = (
+        (4, 6, np.array([0.0, -1.0], np.float32)),
+        (5, 7, np.array([0.0, 1.0], np.float32)),
+        (4, 5, np.array([-1.0, 0.0], np.float32)),
+        (6, 7, np.array([1.0, 0.0], np.float32)),
+    )
+    best = None
+    q = np.array([x, y], np.float32)
+    for a, b, outward in edges:
+        p0, p1 = pts[a], pts[b]
+        d = p1 - p0
+        L2 = float(d @ d)
+        if L2 < 1.0:
+            continue
+        t = float(np.clip(((q - p0) @ d) / L2, 0.0, 1.0))
+        foot = p0 + t * d
+        dist = float(np.hypot(q[0] - foot[0], q[1] - foot[1]))
+        if best is None or dist < best[0]:
+            best = (dist, foot, outward, p0, p1)
+    if best is None or best[0] > search:
+        return False
+    _, foot, outward, p0, p1 = best
+    offs = []
+    span = p1 - p0
+    for s in np.linspace(-0.12, 0.12, 7):
+        base = foot + float(s) * span
+        found = None
+        for k in range(search + 1):
+            qx = int(round(float(base[0] + outward[0] * k)))
+            qy = int(round(float(base[1] + outward[1] * k)))
+            if qx < 0 or qy < 0 or qx >= w or qy >= h:
+                break
+            if mask[qy, qx] > 0:
+                found = k
+                break
+        if found is not None:
+            offs.append(found)
+    if len(offs) < 3:
+        return False
+    line_at = float(np.median(offs))
+    rel = float((q[0] - foot[0]) * outward[0] + (q[1] - foot[1]) * outward[1])
+    return abs(rel - line_at) <= px_tol or (0.0 <= rel <= line_at + px_tol)
+
+
 def align_keypoints_to_white_lines(image: np.ndarray, keypoints: np.ndarray) -> np.ndarray:
     """整体平移网格，吸到真实白线上。
 
