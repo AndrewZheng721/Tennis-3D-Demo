@@ -181,7 +181,7 @@ def analyze_score(
             continue
         if not use_net and last_bounce_side and side == last_bounce_side:
             continue
-        info = classify_xy(xyz[0], xyz[1], eps=0.12)
+        info = classify_xy(xyz[0], xyz[1], eps=0.35)
         seen.add(fid)
         last = fid
         last_bounce_side = side
