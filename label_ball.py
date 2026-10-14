@@ -132,6 +132,22 @@ def _jump_to(keys, fid, step):
     return prv[-1] if prv else keys[0]
 
 
+def _click_xy(win, click, view_w, view_h, scale, frame_w, frame_h):
+    x, y = float(click[0]), float(click[1])
+    try:
+        rx, ry, rw, rh = cv2.getWindowImageRect(win)
+        if rw > 1 and rh > 1:
+            x = (x - rx) * view_w / float(rw)
+            y = (y - ry) * view_h / float(rh)
+    except Exception:
+        pass
+    if x < 0 or y < 0 or x >= view_w or y >= view_h - 64:
+        return None
+    ox = min(max(int(round(x / scale)), 0), frame_w - 1)
+    oy = min(max(int(round(y / scale)), 0), frame_h - 1)
+    return ox, oy
+
+
 def run(video):
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
@@ -146,29 +162,33 @@ def run(video):
     paused = True
     scale = 1.0
     mouse = {"click": None}
+    shown = None
+    shown_fid = None
     win = "ball " + _stem(video)
-    cv2.namedWindow(win)
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(win, lambda e, x, y, f, p: p.update(click=(x, y)) if e == cv2.EVENT_LBUTTONDOWN else None, mouse)
     while True:
-        ok, frame, pos = _read(cap, fid, pos)
-        if not ok:
-            break
+        if shown_fid != fid:
+            ok, frame, pos = _read(cap, fid, pos)
+            if not ok:
+                break
+            shown = frame
+            shown_fid = fid
+        frame = shown
         h, w = frame.shape[:2]
         scale = min(1.0, 1400.0 / max(w, 1))
         view = _draw(frame, fid, ball, fixes, set(jumps), scale)
         cv2.imshow(win, view)
-        key = cv2.waitKeyEx(0 if paused else max(1, int(1000 / fps)))
+        key = cv2.waitKeyEx(30 if paused else max(1, int(1000 / fps)))
         click = mouse["click"]
         mouse["click"] = None
-        if click is not None and click[1] < view.shape[0] - 64:
-            ox = int(round(click[0] / scale))
-            oy = int(round(click[1] / scale))
-            ox = min(max(ox, 0), w - 1)
-            oy = min(max(oy, 0), h - 1)
-            fixes[fid] = (ox, oy, 1)
-            paused = True
-            jumps = _jumps(ball, fixes, total)
-            _save(video, fixes)
+        if click is not None:
+            pt = _click_xy(win, click, view.shape[1], view.shape[0], scale, w, h)
+            if pt is not None:
+                fixes[fid] = (pt[0], pt[1], 1)
+                paused = True
+                jumps = _jumps(ball, fixes, total)
+                _save(video, fixes)
             continue
         if key in (-1, 0):
             if not paused:
