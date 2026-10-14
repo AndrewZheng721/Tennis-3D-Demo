@@ -93,16 +93,29 @@ def _draw(frame, fid, ball, fixes, jumps, scale):
     view = frame
     if scale != 1.0:
         view = cv2.resize(frame, (int(frame.shape[1] * scale), int(frame.shape[0] * scale)))
+    pts = []
     for d in range(-15, 16):
         pt = _at(fid + d, ball, fixes)
-        if pt is None:
-            continue
-        x, y = int(pt[0] * scale), int(pt[1] * scale)
-        if d == 0:
-            color = (0, 255, 255) if fid in fixes else (0, 255, 0)
-            cv2.circle(view, (x, y), 8, color, -1)
+        pts.append(None if pt is None else (int(pt[0] * scale), int(pt[1] * scale)))
+    cur = pts[15]
+    overlay = view.copy()
+    seq = []
+    for p in pts:
+        near = False
+        if p is not None and cur is not None:
+            near = (p[0] - cur[0]) ** 2 + (p[1] - cur[1]) ** 2 <= 16 * 16
+        if p is None or near:
+            if len(seq) >= 2:
+                cv2.polylines(overlay, [np.array(seq, np.int32)], False, (255, 160, 0), 1, cv2.LINE_AA)
+            seq = []
         else:
-            cv2.circle(view, (x, y), 3, (255, 180, 0) if d < 0 else (0, 180, 255), -1)
+            seq.append(p)
+    if len(seq) >= 2:
+        cv2.polylines(overlay, [np.array(seq, np.int32)], False, (255, 160, 0), 1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, 0.35, view, 0.65, 0, view)
+    if cur is not None:
+        color = (0, 255, 255) if fid in fixes else (0, 255, 0)
+        cv2.circle(view, cur, 12, color, 1, cv2.LINE_AA)
     if fid in jumps:
         cv2.circle(view, (24, 24), 10, (0, 0, 255), -1)
     gone = fid in fixes and fixes[fid][2] <= 0
