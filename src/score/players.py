@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+from .cntext import put_cn, zone_cn
 from .court3d import estimate_camera, ray_at_z
 from .geom import NET_X, NET_Y, REF_KPS, image_to_court
 
@@ -361,13 +362,12 @@ def draw_players(img, players):
         side = p.get("side") or ""
         color = (0, 165, 255) if side == "near" else (255, 0, 180)
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(
+        put_cn(
             img,
-            f"{side or 'P'} #{p.get('track_id', 0)}",
+            f"{zone_cn(side) if side else '人'} #{p.get('track_id', 0)}",
             (x1, max(18, y1 - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
             color,
+            0.6,
             2,
         )
     return img

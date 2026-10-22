@@ -32,6 +32,7 @@ from src.court.court_line_detector import (
     choose_sample_ids,
     read_frame_at,
 )
+from src.score.cntext import put_cn, zone_cn
 from src.score.pipeline import analyze_score
 from src.score.players import PlayerTracker, default_person_weights, draw_players, lift_players
 from src.score.traj3d import reconstruct_ball_3d
@@ -369,18 +370,10 @@ def main():
                     b = bounce_map[frame_id]
                     serve = b.get("serve_zone") or "-"
                     rally = b.get("rally_zone") or "-"
-                    last_event = f"BOUNCE  SERVE {serve}  RALLY {rally}"
+                    last_event = f"落点  发球 {zone_cn(serve)}  回合 {zone_cn(rally)}"
                     last_event_fid = frame_id
                 if last_event and frame_id - last_event_fid <= 45:
-                    cv2.putText(
-                        vis,
-                        last_event,
-                        (20, 150),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.85,
-                        (0, 255, 255),
-                        2,
-                    )
+                    put_cn(vis, last_event, (20, 150), (0, 255, 255), 0.85, 2)
             else:
                 cv2.putText(
                     vis,

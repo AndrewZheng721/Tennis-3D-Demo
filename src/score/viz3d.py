@@ -8,6 +8,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
+from matplotlib.font_manager import FontProperties
+
+from .cntext import font_file, zone_cn
 from .court3d import COURT_LINES_3D, COURT_XYZ, DB, NET
 
 
@@ -81,8 +84,9 @@ def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None, bo
                 linewidths=2,
             )
             last = done[-1]
-            tag = f"SERVE {last.get('serve_zone') or '-'}  RALLY {last.get('rally_zone') or '-'}"
-            ax.text(last["xyz"][0], last["xyz"][1], 0.35, tag, fontsize=8, color="#1a1a1a")
+            tag = f"发球 {zone_cn(last.get('serve_zone'))}  回合 {zone_cn(last.get('rally_zone'))}"
+            fp = FontProperties(fname=font_file()) if font_file() else None
+            ax.text(last["xyz"][0], last["xyz"][1], 0.35, tag, fontsize=8, color="#1a1a1a", fontproperties=fp)
         if fid < len(players):
             for p in players[fid]:
                 pxyz = p.get("xyz")
@@ -90,7 +94,8 @@ def write_traj3d_video(traj3d, path: str, preview_path: Optional[str] = None, bo
                     continue
                 col = "#2980b9" if p.get("side") == "near" else "#8e44ad"
                 ax.scatter([pxyz[0]], [pxyz[1]], [0.0], c=col, s=40, marker="o")
-                ax.text(pxyz[0], pxyz[1], 0.25, p.get("side") or "P", fontsize=7, color=col)
+                fp = FontProperties(fname=font_file()) if font_file() else None
+                ax.text(pxyz[0], pxyz[1], 0.25, zone_cn(p.get("side")) if p.get("side") else "人", fontsize=7, color=col, fontproperties=fp)
         xyz = rec.get("xyz")
         if xyz:
             trail.append(xyz)

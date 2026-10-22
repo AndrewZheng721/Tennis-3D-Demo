@@ -42,6 +42,8 @@ import numpy as np
 import pandas as pd
 from ultralytics import YOLO
 
+from src.score.cntext import put_cn
+
 
 def _smooth_xy(xs, ys, win=9):
     xs = np.asarray(xs, dtype=np.float64)
@@ -478,32 +480,8 @@ class BallTracker:
             cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
             cv2.circle(vis, (cx, cy), 4, (0, 255, 255), -1)
             conf = bbox_with_conf[4] if len(bbox_with_conf) > 4 else 0
-            cv2.putText(
-                vis,
-                f"ball {conf:.2f}",
-                (x1, max(20, y1 - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 255),
-                2,
-            )
+            put_cn(vis, f"球 {conf:.2f}", (x1, max(20, y1 - 8)), (0, 255, 255), 0.6, 2)
         if is_shot:
-            cv2.putText(
-                vis,
-                "SHOT",
-                (20, 110),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 0, 255),
-                3,
-            )
-        cv2.putText(
-            vis,
-            f"Frame: {frame_id}",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
-            2,
-        )
+            put_cn(vis, "击球", (20, 110), (0, 0, 255), 1.0, 3)
+        put_cn(vis, f"帧 {frame_id}", (20, 40), (0, 255, 0), 1.0, 2)
         return vis
