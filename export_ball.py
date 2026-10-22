@@ -65,6 +65,7 @@ def _grab(cap, want):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--videos", default="high_angle_dataset")
+    p.add_argument("--only", default=None)
     p.add_argument("--out", default="dataset/tracknet_ball")
     p.add_argument("--val-ratio", type=float, default=0.15)
     p.add_argument("--seed", type=int, default=0)
@@ -72,6 +73,8 @@ def main():
     label_dir = os.path.join(args.videos, "labels_ball")
     paths = sorted(glob.glob(os.path.join(label_dir, "*.csv")))
     paths = [x for x in paths if "high_angle_01" not in os.path.basename(x)]
+    if args.only:
+        paths = [x for x in paths if args.only in os.path.basename(x)]
     if not paths:
         raise SystemExit(f"no csv in {label_dir}")
     rows = []
