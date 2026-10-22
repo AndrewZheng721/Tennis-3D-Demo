@@ -3,6 +3,7 @@ import csv
 import glob
 import json
 import os
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -80,13 +81,6 @@ def _save(video, fixes):
             x, y, vis = fixes[fid]
             w.writerow([fid, x, y, vis])
     print("saved", path, "fixes", len(fixes))
-
-
-def _read(cap, fid, pos):
-    if pos != fid:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, fid)
-    ok, frame = cap.read()
-    return ok, frame, fid + 1
 
 
 def _draw(frame, fid, ball, fixes, jumps, scale, mark_a):
@@ -174,6 +168,33 @@ def _click_xy(win, click, view_w, view_h, scale, frame_w, frame_h):
     return ox, oy
 
 
+def _load_frame(cap, fid, pos, cache):
+    if fid in cache:
+        cache.move_to_end(fid)
+        return True, cache[fid], pos
+    if pos != fid:
+        if pos is not None and 0 < fid - pos <= 12:
+            while pos <= fid:
+                ok, fr = cap.read()
+                if not ok:
+                    return False, None, pos
+                cache[pos] = fr
+                pos += 1
+                if len(cache) > 24:
+                    cache.popitem(last=False)
+            return True, cache[fid], pos
+        cap.set(cv2.CAP_PROP_POS_FRAMES, fid)
+        pos = fid
+    ok, fr = cap.read()
+    if not ok:
+        return False, None, pos
+    cache[fid] = fr
+    pos = fid + 1
+    if len(cache) > 24:
+        cache.popitem(last=False)
+    return True, fr, pos
+
+
 def run(video):
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
@@ -183,47 +204,56 @@ def run(video):
     ball = _load_auto(video)
     fixes = _load_fixes(_fix_path(video))
     jumps = _jumps(ball, fixes, total)
+    jump_set = set(jumps)
     fid = jumps[0] if jumps else 0
     pos = None
     paused = True
     mark_a = None
     scale = 1.0
+    unsaved = 0
+    need = True
     mouse = {"click": None, "cb": _on_mouse}
-    shown = None
-    shown_fid = None
+    cache = OrderedDict()
     hooked = False
+    view = None
     win = "ball " + _stem(video)
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+
+    def edited(flush=False):
+        nonlocal unsaved
+        unsaved += 1
+        if flush or unsaved >= 25:
+            _save(video, fixes)
+            unsaved = 0
+
     while True:
-        if shown_fid != fid:
-            ok, frame, pos = _read(cap, fid, pos)
+        if need:
+            ok, frame, pos = _load_frame(cap, fid, pos, cache)
             if not ok:
                 break
-            shown = frame
-            shown_fid = fid
-        frame = shown
-        h, w = frame.shape[:2]
-        scale = min(1.0, 1400.0 / max(w, 1))
-        view = _draw(frame, fid, ball, fixes, set(jumps), scale, mark_a)
-        cv2.imshow(win, view)
-        if not hooked:
-            cv2.waitKey(1)
-            cv2.setMouseCallback(win, mouse["cb"], mouse)
-            hooked = True
+            h, w = frame.shape[:2]
+            scale = min(1.0, 1400.0 / max(w, 1))
+            view = _draw(frame, fid, ball, fixes, jump_set, scale, mark_a)
+            cv2.imshow(win, view)
+            need = False
+            if not hooked:
+                cv2.waitKey(1)
+                cv2.setMouseCallback(win, mouse["cb"], mouse)
+                hooked = True
         key = cv2.waitKeyEx(30 if paused else max(1, int(1000 / fps)))
         click = mouse["click"]
         mouse["click"] = None
-        if click is not None:
+        if click is not None and view is not None:
             pt = _click_xy(win, click, view.shape[1], view.shape[0], scale, w, h)
             fixes[fid] = (pt[0], pt[1], 1)
             paused = True
-            print("click", fid, pt[0], pt[1])
-            jumps = _jumps(ball, fixes, total)
-            _save(video, fixes)
+            need = True
+            edited()
             continue
         if key in (-1, 0):
             if not paused:
                 fid = min(total - 1, fid + 1)
+                need = True
                 if fid >= total - 1:
                     paused = True
             continue
@@ -232,26 +262,33 @@ def run(video):
             break
         if code == ord(" "):
             paused = not paused
+            if not paused:
+                need = True
         elif code in (ord("a"),) or key == 2424832:
             paused = True
             fid = max(0, fid - 1)
+            need = True
         elif code in (ord("d"),) or key == 2555904:
             paused = True
             fid = min(total - 1, fid + 1)
+            need = True
         elif code == ord("q"):
             paused = True
             fid = max(0, fid - 10)
+            need = True
         elif code == ord("e"):
             paused = True
             fid = min(total - 1, fid + 10)
+            need = True
         elif code == ord("0"):
             fixes[fid] = (0, 0, 0)
             paused = True
-            jumps = _jumps(ball, fixes, total)
-            _save(video, fixes)
+            need = True
+            edited()
         elif code == ord("["):
             mark_a = fid
             paused = True
+            need = True
         elif code == ord("]"):
             if mark_a is not None:
                 a, b = (mark_a, fid) if mark_a <= fid else (fid, mark_a)
@@ -260,17 +297,21 @@ def run(video):
                 print("range0", a, b, b - a + 1)
                 mark_a = None
                 paused = True
-                jumps = _jumps(ball, fixes, total)
-                _save(video, fixes)
+                need = True
+                edited(True)
         elif code == ord("u"):
             fixes.pop(fid, None)
             paused = True
-            jumps = _jumps(ball, fixes, total)
-            _save(video, fixes)
+            need = True
+            edited()
         elif code in (ord("n"), ord("p")):
             paused = True
+            jumps = _jumps(ball, fixes, total)
+            jump_set = set(jumps)
             fid = _jump_to(jumps, fid, 1 if code == ord("n") else -1)
-    _save(video, fixes)
+            need = True
+    if unsaved:
+        _save(video, fixes)
     cap.release()
     cv2.destroyAllWindows()
 
